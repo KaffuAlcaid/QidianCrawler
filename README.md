@@ -77,7 +77,7 @@ TXT 和 JSON 都按章节分别生成文件。TXT 写入书名、章节标题和
     "title": "铁血残明"
   },
   "chapterCount": 1,
-  "chapters": \\\[]
+  "chapters": []
 }
 ```
 
@@ -91,7 +91,7 @@ TXT 和 JSON 都按章节分别生成文件。TXT 写入书名、章节标题和
 {
   "time": "2026-08-01T06:25:31.123Z",
   "level": "INFO",
-  "code": "CHAPTER\\\\\\\_ADDED",
+  "code": "CHAPTER ADDED",
   "message": "章节已加入当前批次",
   "operationId": "capture-...",
   "details": {
@@ -142,7 +142,7 @@ python tools/check.py
 需要指定浏览器时：
 
 ```powershell
-python tools/check.py --browser "C:\\\\\\\\Program Files\\\\\\\\Google\\\\\\\\Chrome\\\\\\\\Application\\\\\\\\chrome.exe"
+python tools/check.py --browser "C:\Program Files\Google\Chrome\Application\chrome.exe"
 ```
 
 如果显式指定的浏览器路径无效，命令会立即失败。校验输出会列出实际使用的浏览器路径和可读取到的版本

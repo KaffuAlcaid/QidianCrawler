@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "QidianCrawler",
+  "version": "0.1.0",
+  "description": "手动或按目标章数采集起点章节，并导出为 UTF-8 TXT 或 JSON。",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads",
+    "offscreen",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "QidianCrawler",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "diagnostics.html",
+    "open_in_tab": true
+  }
+}

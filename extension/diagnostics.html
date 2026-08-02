@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QidianCrawler 日志与诊断</title>
+    <link rel="stylesheet" href="diagnostics.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">QidianCrawler</p>
+          <h1>日志与诊断</h1>
+          <p class="intro">
+            自检与日志均在本地运行。诊断报告不会包含正文、Cookie、书名或完整网址。
+          </p>
+        </div>
+        <button id="run-diagnostics" type="button">运行自检</button>
+      </header>
+
+      <section class="panel" aria-labelledby="checks-title">
+        <div class="panel-heading">
+          <h2 id="checks-title">自检结果</h2>
+          <p id="checks-summary">尚未运行</p>
+        </div>
+        <div id="checks" class="checks empty">点击“运行自检”开始检查。</div>
+      </section>
+
+      <section class="panel" aria-labelledby="logs-title">
+        <div class="panel-heading controls-heading">
+          <div>
+            <h2 id="logs-title">最近日志</h2>
+            <p id="logs-summary">正在读取……</p>
+          </div>
+          <div class="controls">
+            <label for="level-filter">级别</label>
+            <select id="level-filter">
+              <option value="ALL">全部</option>
+              <option value="ERROR">ERROR</option>
+              <option value="WARN">WARN</option>
+              <option value="INFO">INFO</option>
+              <option value="DEBUG">DEBUG</option>
+            </select>
+            <label class="toggle">
+              <input id="debug-enabled" type="checkbox">
+              保存 DEBUG
+            </label>
+          </div>
+        </div>
+        <div id="logs" class="log-list empty">暂无日志。</div>
+      </section>
+
+      <section class="panel report-panel" aria-labelledby="report-title">
+        <div>
+          <h2 id="report-title">诊断报告</h2>
+          <p>报告包含扩展版本、自检结果和脱敏日志，便于定位问题。</p>
+        </div>
+        <div class="report-actions">
+          <button id="copy-report" class="secondary" type="button">复制报告</button>
+          <button id="export-report" type="button">导出 JSON</button>
+          <button id="clear-logs" class="danger" type="button">清空日志</button>
+        </div>
+      </section>
+
+      <p id="page-status" class="page-status" aria-live="polite">准备就绪</p>
+    </main>
+
+    <script src="src/events.js"></script>
+    <script src="src/log-store.js"></script>
+    <script src="src/core.js"></script>
+    <script src="src/log-client.js"></script>
+    <script src="diagnostics.js"></script>
+  </body>
+</html>

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QidianCrawler</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header class="header">
+        <div>
+          <h1>QidianCrawler</h1>
+          <p>Chrome / Edge 手动与自动章节采集</p>
+        </div>
+        <button id="open-diagnostics" class="link-button" type="button">
+          日志与诊断
+        </button>
+      </header>
+
+      <section class="batch-card" aria-labelledby="batch-title">
+        <div class="section-heading">
+          <h2 id="batch-title">当前批次</h2>
+          <span id="batch-size" class="size">0 B</span>
+        </div>
+        <p id="batch-book" class="book-title">尚未采集章节</p>
+        <p class="count"><strong id="batch-count">0</strong> 章</p>
+      </section>
+
+      <section class="automation-card" aria-labelledby="automation-title">
+        <div class="section-heading">
+          <h2 id="automation-title">自动模式</h2>
+          <span id="automation-state" class="state-badge">未运行</span>
+        </div>
+        <label for="automation-target">目标章数</label>
+        <input
+          id="automation-target"
+          type="number"
+          inputmode="numeric"
+          min="1"
+          max="500"
+          step="1"
+          value="30"
+          aria-describedby="automation-hint"
+        >
+        <p id="automation-hint" class="field-hint">当前批次会计入目标，可输入 1–500 章</p>
+        <div class="automation-controls">
+          <button id="automation-start" type="button">开始自动化</button>
+          <button id="automation-stop" class="secondary" type="button" disabled>
+            停止
+          </button>
+        </div>
+        <div class="progress-row">
+          <progress id="automation-progress" max="1" value="0"></progress>
+          <span id="automation-progress-text">0 / 0 章</span>
+        </div>
+        <p id="automation-book" class="automation-book">书名：等待采集首章</p>
+        <p id="automation-detail" class="automation-detail">
+          自动采集、打开下一章，并在达到目标后按所选格式导出。
+        </p>
+      </section>
+
+      <section class="manual-card" aria-labelledby="manual-title">
+        <h2 id="manual-title">手动操作</h2>
+        <div class="workflow">
+          <button id="capture-current" type="button">采集当前章</button>
+          <button id="open-next" class="secondary" type="button">打开下一章</button>
+        </div>
+      </section>
+
+      <section class="export-card" aria-labelledby="export-title">
+        <h2 id="export-title">导出批次</h2>
+        <label for="export-format">导出格式</label>
+        <div class="export-controls">
+          <select id="export-format">
+            <option value="txt">TXT</option>
+            <option value="json">JSON</option>
+          </select>
+          <button id="export-batch" type="button">导出</button>
+        </div>
+        <button id="clear-batch" class="danger-link" type="button">
+          清空当前批次
+        </button>
+      </section>
+
+      <section id="status" class="status" aria-live="polite">
+        <p id="status-message">等待操作</p>
+        <p id="status-meta" class="status-meta" hidden></p>
+      </section>
+
+    </main>
+
+    <script src="src/events.js"></script>
+    <script src="src/core.js"></script>
+    <script src="src/log-client.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

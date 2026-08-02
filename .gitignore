@@ -1,0 +1,10 @@
+.idea/
+.vscode/
+dist/
+*.crx
+*.pem
+RELEASE_NOTES.md
+__pycache__/
+*.py[cod]
+Thumbs.db
+Desktop.ini

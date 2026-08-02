@@ -1,0 +1,234 @@
+:root {
+  color-scheme: light;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  color: #202124;
+  background: #f3f5f7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  width: min(1040px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 36px 0 56px;
+}
+
+header,
+.panel-heading,
+.report-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  margin-top: 3px;
+  font-size: 30px;
+}
+
+h2 {
+  font-size: 18px;
+}
+
+.eyebrow {
+  color: #a52019;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.intro,
+.panel-heading p,
+.report-panel p,
+.controls label {
+  color: #5f6368;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.intro {
+  max-width: 650px;
+  margin-top: 8px;
+}
+
+button,
+select {
+  min-height: 40px;
+  border-radius: 8px;
+  font: inherit;
+}
+
+button {
+  border: 1px solid #b3261e;
+  padding: 0 18px;
+  color: #ffffff;
+  background: #b3261e;
+  cursor: pointer;
+  font-weight: 650;
+}
+
+button.secondary {
+  color: #b3261e;
+  background: #ffffff;
+}
+
+button.danger {
+  border-color: #7d2822;
+  color: #7d2822;
+  background: #ffffff;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.panel {
+  margin-top: 22px;
+  padding: 22px;
+  border: 1px solid #dfe3e8;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 5px 22px rgb(31 35 41 / 5%);
+}
+
+.controls-heading {
+  align-items: flex-end;
+}
+
+.controls,
+.report-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.controls select {
+  border: 1px solid #9aa0a6;
+  padding: 0 10px;
+  background: #ffffff;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.checks,
+.log-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.empty {
+  padding: 18px;
+  border-radius: 9px;
+  color: #5f6368;
+  background: #f7f8fa;
+  font-size: 13px;
+}
+
+.check,
+.log-entry {
+  padding: 13px 14px;
+  border: 1px solid #e2e5e9;
+  border-left-width: 5px;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+.check.pass,
+.log-entry.info {
+  border-left-color: #188038;
+}
+
+.check.warn,
+.check.skip,
+.log-entry.warn {
+  border-left-color: #e37400;
+}
+
+.check.fail,
+.log-entry.error {
+  border-left-color: #c5221f;
+}
+
+.log-entry.debug {
+  border-left-color: #5f6368;
+}
+
+.check strong,
+.log-entry strong {
+  font-size: 13px;
+}
+
+.check p,
+.log-entry p {
+  margin-top: 5px;
+  color: #4c5157;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.check .suggestion {
+  color: #7a4b00;
+}
+
+.log-meta,
+.log-details {
+  font-family: Consolas, "SFMono-Regular", monospace;
+}
+
+.log-meta {
+  margin-left: 8px;
+  color: #6b7076;
+  font-size: 11px;
+}
+
+.log-details {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.report-panel {
+  align-items: flex-end;
+}
+
+.page-status {
+  margin-top: 16px;
+  color: #5f6368;
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  header,
+  .panel-heading,
+  .report-panel,
+  .controls-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .controls,
+  .report-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

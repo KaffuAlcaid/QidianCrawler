@@ -1,0 +1,25 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #202124;
+}
+
+main {
+  width: min(860px, calc(100% - 32px));
+  margin: 32px auto;
+}
+
+li {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 4px solid #9aa0a6;
+  background: #f6f7f8;
+}
+
+li.pass {
+  border-left-color: #188038;
+}
+
+li.fail {
+  border-left-color: #c5221f;
+  color: #a50e0e;
+}

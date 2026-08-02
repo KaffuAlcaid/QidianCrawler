@@ -1,6 +1,7 @@
 (function defineQidianCrawlerCore(root) {
   "use strict";
 
+
   const PROJECT_NAME = "QidianCrawler";
   const BATCH_STORAGE_KEY = "qidianCrawler.batch.v1";
   const SETTINGS_STORAGE_KEY = "qidianCrawler.settings.v1";

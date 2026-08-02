@@ -1,6 +1,7 @@
 (function defineQidianCrawlerAutomationController(root) {
   "use strict";
 
+
   const DEFAULT_NAVIGATION_DELAY_MS = 2_000;
 
   function createError(code, message) {

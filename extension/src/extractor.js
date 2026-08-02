@@ -1,6 +1,7 @@
 (function defineQidianCrawlerExtractor(root) {
   "use strict";
 
+
   const core = root.QidianCrawlerCore;
   if (!core) {
     throw new Error("QidianCrawlerCore 必须先于 extractor.js 加载。");

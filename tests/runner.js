@@ -1,6 +1,7 @@
 (function runBrowserTests() {
   "use strict";
 
+
   const core = QidianCrawlerCore;
   const batchStoreApi = QidianCrawlerBatchStore;
   const extractor = QidianCrawlerExtractor;

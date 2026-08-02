@@ -1,6 +1,7 @@
 (function defineQidianCrawlerAutomationState(root) {
   "use strict";
 
+
   const AUTOMATION_STORAGE_KEY = "qidianCrawler.automation.v1";
   const AUTOMATION_KIND = "qidian-extension-automation";
   const AUTOMATION_SCHEMA_VERSION = 1;

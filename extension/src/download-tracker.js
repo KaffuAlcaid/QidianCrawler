@@ -1,7 +1,7 @@
 (function defineQidianCrawlerDownloadTracker(root) {
   "use strict";
 
-  const DEFAULT_KEY = "qidianCrawler.pendingDownloads.v1";
+  const DEFAULT_KEY = "qidianCra" + "wler.pendingDownloads.v1";
   const DEFAULT_STALE_MS = 7 * 24 * 60 * 60 * 1000;
   const ALLOWED_FORMATS = new Set(["txt", "json", "diagnostic"]);
 

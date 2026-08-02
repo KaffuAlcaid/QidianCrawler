@@ -1,6 +1,7 @@
 (function initializePopup() {
   "use strict";
 
+
   const core = QidianCrawlerCore;
   const logs = QidianCrawlerLogClient;
   const captureButton = document.querySelector("#capture-current");

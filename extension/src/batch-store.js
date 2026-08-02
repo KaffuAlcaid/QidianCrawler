@@ -1,6 +1,7 @@
 (function defineQidianCrawlerBatchStore(root) {
   "use strict";
 
+
   const core = root.QidianCrawlerCore;
   if (!core) {
     throw new Error("QidianCrawlerCore 必须先于 batch-store.js 加载。");

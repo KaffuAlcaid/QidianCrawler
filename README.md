@@ -25,6 +25,7 @@ QidianCrawler 是一个面向 Windows 版 Chrome 和 Edge 的 Manifest V3 浏览
 4. 选择本项目的 `extension/` 目录，或选择打包生成的 `dist/QidianCrawler-v<版本>/`。
 5. 如果安装或更新扩展时章节页已经打开，请刷新该页面一次。
 
+
 Edge 的安装步骤相同，扩展管理地址为 `edge://extensions/`。Chrome 是主要支持目标，Edge 使用同一套扩展源码和 ZIP。
 
 ## 使用方法

@@ -1,6 +1,7 @@
 (function initializeDiagnostics() {
   "use strict";
 
+
   const core = QidianCrawlerCore;
   const logs = QidianCrawlerLogClient;
   const logStoreApi = QidianCrawlerLogStore;

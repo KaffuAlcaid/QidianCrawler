@@ -1,6 +1,7 @@
 (function defineQidianCrawlerPageReadiness(root) {
   "use strict";
 
+
   const extractor = root.QidianCrawlerExtractor;
   if (!extractor || typeof extractor.extract !== "function") {
     throw new Error("QidianCrawlerExtractor 必须先于 page-readiness.js 加载。");

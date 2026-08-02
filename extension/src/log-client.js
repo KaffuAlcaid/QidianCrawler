@@ -1,6 +1,7 @@
 (function defineQidianCrawlerLogClient(root) {
   "use strict";
 
+
   const events = root.QidianCrawlerEvents;
   if (!events) {
     throw new Error("QidianCrawlerEvents 必须先于 log-client.js 加载。");

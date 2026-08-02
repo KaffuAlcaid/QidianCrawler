@@ -15,6 +15,7 @@ from project import (
 )
 
 
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browser", help="Chrome 或 Edge 可执行文件路径。")

@@ -1,6 +1,7 @@
 (function defineQidianCrawlerEvents(root) {
   "use strict";
 
+
   const definitions = {
     EXTENSION_INSTALLED: {
       level: "INFO",

@@ -8,6 +8,7 @@ importScripts(
   "src/automation-controller.js"
 );
 
+
 const manifest = chrome.runtime.getManifest();
 const storageAdapter =
   QidianCrawlerLogStore.createChromeStorageAdapter(chrome.storage.local);

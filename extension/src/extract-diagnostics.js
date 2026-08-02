@@ -1,6 +1,7 @@
 (() => {
   "use strict";
 
+
   const extractor = globalThis.QidianCrawlerExtractor;
   if (!extractor) {
     return {

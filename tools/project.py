@@ -26,6 +26,7 @@ REQUIRED_PERMISSIONS = {
     "scripting",
     "storage",
 }
+
 REQUIRED_RUNTIME_FILES = frozenset(
     {
         "background.js",

@@ -231,6 +231,27 @@
         }
         return options.tab || { id: tabId, status: "complete" };
       },
+      async inspectDownload(downloadId) {
+        if (typeof options.inspectDownload === "function") {
+          return options.inspectDownload(downloadId);
+        }
+        if (
+          options.downloadStates &&
+          Object.prototype.hasOwnProperty.call(
+            options.downloadStates,
+            String(downloadId)
+          )
+        ) {
+          return options.downloadStates[String(downloadId)];
+        }
+        return { state: "in_progress" };
+      },
+      async getPendingTrackedDownloadCount() {
+        if (typeof options.getPendingTrackedDownloadCount === "function") {
+          return options.getPendingTrackedDownloadCount();
+        }
+        return Number(options.pendingTrackedDownloadCount || 0);
+      },
       async downloadExport(exported, operationId, metadata) {
         downloads.push({ exported, operationId, metadata });
         const callIndex = downloads.length - 1;
@@ -241,8 +262,19 @@
         ) {
           throw options.downloadError;
         }
-        return options.downloadIds?.[callIndex] ??
+        const downloadId =
+          options.downloadIds?.[callIndex] ??
           (options.downloadId ?? 101) + callIndex;
+        const hasTerminalOverride =
+          Array.isArray(options.downloadTerminals) &&
+          Object.prototype.hasOwnProperty.call(
+            options.downloadTerminals,
+            callIndex
+          );
+        const terminal = hasTerminalOverride
+          ? options.downloadTerminals[callIndex]
+          : null;
+        return terminal ? { downloadId, terminal } : { downloadId };
       },
       async record(code, operationId, details, eventKey) {
         records.push({ code, operationId, details, eventKey });
@@ -385,6 +417,8 @@
     equal(state.phase, automationStateApi.PHASE.EXPORTING);
     state = automationStateApi.acceptDownload(state, 91, timestamp);
     state = automationStateApi.acceptDownload(state, 92, timestamp);
+    state = automationStateApi.settleDownload(state, 91, true, timestamp);
+    state = automationStateApi.settleDownload(state, 92, true, timestamp);
     state = automationStateApi.complete(state, timestamp);
     equal(state.status, automationStateApi.STATUS.COMPLETED);
     equal(state.downloadIds.length, 2);
@@ -421,7 +455,13 @@
     assert(!Object.prototype.hasOwnProperty.call(view, "nextNavigationUrl"));
     assert(!Object.prototype.hasOwnProperty.call(view, "visitedChapterKeys"));
     assert(!Object.prototype.hasOwnProperty.call(view, "downloadIds"));
+    assert(!Object.prototype.hasOwnProperty.call(view, "completedDownloadIds"));
+    assert(!Object.prototype.hasOwnProperty.call(view, "failedDownloadIds"));
+    equal(view.acceptedFileCount, 0);
     equal(view.downloadedFileCount, 0);
+    equal(view.failedFileCount, 0);
+    equal(view.pendingFileCount, 0);
+    equal(view.batchLocked, true);
     const serialized = JSON.stringify(view);
     assert(!serialized.includes("private=removed"));
     assert(!serialized.includes("1024424884:1"));
@@ -432,15 +472,18 @@
       extractions: [automaticChapter("1")],
       downloadId: 31,
     });
-    const result = await harness.controller.start({
+    const exporting = await harness.controller.start({
       tabId: 7,
       targetCount: 1,
       format: "txt",
       operationId: "auto-one",
     });
-    equal(result.status, automationStateApi.STATUS.COMPLETED);
-    equal(result.capturedCount, 1);
-    equal(result.downloadedFileCount, 1);
+    equal(exporting.status, automationStateApi.STATUS.RUNNING);
+    equal(exporting.phase, automationStateApi.PHASE.EXPORTING);
+    equal(exporting.capturedCount, 1);
+    equal(exporting.acceptedFileCount, 1);
+    equal(exporting.downloadedFileCount, 0);
+    equal(exporting.pendingFileCount, 1);
     equal(
       (await automationStateApi.load(harness.sessionStorage)).downloadIds[0],
       31
@@ -450,14 +493,242 @@
       harness.downloads[0].exported.relativePath,
       "QidianCrawler/铁血残明-1章/第1章.txt"
     );
+    const completed = await harness.controller.handleDownloadSettled(31, true);
+    equal(completed.status, automationStateApi.STATUS.COMPLETED);
+    equal(completed.downloadedFileCount, 1);
+    equal(completed.pendingFileCount, 0);
     await harness.controller.reconcile();
     await harness.controller.getState();
     equal(harness.downloads.length, 1, "完成后对账触发了重复下载");
   });
 
+  test("自动导出会等待全部浏览器下载终态后才完成", async () => {
+    const harness = createAutomationHarness({
+      batch: batchFrom([automaticChapter("1", "2"), automaticChapter("2")]),
+      downloadIds: [201, 202],
+    });
+    const exporting = await harness.controller.start({
+      tabId: 7,
+      targetCount: 2,
+      format: "txt",
+      operationId: "auto-wait-downloads",
+    });
+    equal(exporting.status, automationStateApi.STATUS.RUNNING);
+    equal(exporting.phase, automationStateApi.PHASE.EXPORTING);
+    equal(exporting.acceptedFileCount, 2);
+    equal(exporting.downloadedFileCount, 0);
+    equal(exporting.pendingFileCount, 2);
+    equal(exporting.batchLocked, true);
+
+    const unrelated = await harness.controller.handleDownloadSettled(999, true);
+    equal(unrelated.pendingFileCount, 2, "无关下载改变了自动任务状态");
+    const oneCompleted = await harness.controller.handleDownloadSettled(
+      202,
+      true
+    );
+    equal(oneCompleted.status, automationStateApi.STATUS.RUNNING);
+    equal(oneCompleted.downloadedFileCount, 1);
+    equal(oneCompleted.pendingFileCount, 1);
+
+    const duplicate = await harness.controller.handleDownloadSettled(
+      202,
+      false
+    );
+    equal(duplicate.downloadedFileCount, 1);
+    equal(duplicate.failedFileCount, 0, "重复的相反终态覆盖了首次终态");
+    const completed = await harness.controller.handleDownloadSettled(201, true);
+    equal(completed.status, automationStateApi.STATUS.COMPLETED);
+    equal(completed.downloadedFileCount, 2);
+    equal(completed.pendingFileCount, 0);
+    equal(completed.batchLocked, false);
+  });
+
+  test("下载失败后会保留待定下载锁并继续收敛终态", async () => {
+    const harness = createAutomationHarness({
+      batch: batchFrom([automaticChapter("1", "2"), automaticChapter("2")]),
+      downloadIds: [211, 212],
+    });
+    const exporting = await harness.controller.start({
+      tabId: 7,
+      targetCount: 2,
+      format: "json",
+      operationId: "auto-terminal-failure",
+    });
+    equal(exporting.status, automationStateApi.STATUS.RUNNING);
+    equal(exporting.phase, automationStateApi.PHASE.EXPORTING);
+    equal(exporting.acceptedFileCount, 2);
+    equal(exporting.downloadedFileCount, 0);
+    equal(exporting.pendingFileCount, 2);
+
+    const failed = await harness.controller.handleDownloadSettled(211, false);
+    equal(failed.status, automationStateApi.STATUS.FAILED);
+    equal(failed.failedFileCount, 1);
+    equal(failed.pendingFileCount, 1);
+    equal(failed.batchLocked, true);
+    await rejectsCode(
+      () => harness.controller.clearBatch(),
+      "AUTOMATION_BATCH_LOCKED"
+    );
+    equal((await harness.batchStore.getBatch()).chapters.length, 2);
+
+    const settled = await harness.controller.handleDownloadSettled(212, true);
+    equal(settled.status, automationStateApi.STATUS.FAILED);
+    equal(settled.downloadedFileCount, 1);
+    equal(settled.pendingFileCount, 0);
+    equal(settled.batchLocked, false);
+    const cleared = await harness.controller.clearBatch();
+    equal(cleared.clearedCount, 2);
+    equal(await harness.batchStore.getBatch(), null);
+  });
+
+  test("部分文件提交失败时未结束的已受理下载仍锁定批次", async () => {
+    const harness = createAutomationHarness({
+      batch: batchFrom([automaticChapter("1", "2"), automaticChapter("2")]),
+      downloadIds: [221, 222],
+      downloadError: new Error("合成的下载 API 拒绝"),
+      downloadErrorAt: 1,
+    });
+    const failed = await harness.controller.start({
+      tabId: 7,
+      targetCount: 2,
+      format: "txt",
+      operationId: "auto-partial-rejection",
+    });
+    equal(failed.status, automationStateApi.STATUS.FAILED);
+    equal(failed.acceptedFileCount, 1);
+    equal(failed.pendingFileCount, 1);
+    equal(failed.batchLocked, true);
+    await rejectsCode(
+      () =>
+        harness.controller.start({
+          tabId: 7,
+          targetCount: 2,
+          format: "txt",
+          operationId: "auto-restart-too-early",
+        }),
+      "AUTOMATION_DOWNLOADS_PENDING"
+    );
+
+    const settled = await harness.controller.handleDownloadSettled(221, true);
+    equal(settled.status, automationStateApi.STATUS.FAILED);
+    equal(settled.pendingFileCount, 0);
+    equal(settled.batchLocked, false);
+  });
+
+  test("旧版仅记录受理 ID 的完成状态会重新查询真实下载终态", async () => {
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    let legacy = automationStateApi.start(
+      {
+        tabId: 7,
+        targetCount: 1,
+        format: "txt",
+        operationId: "auto-legacy-completed",
+        batchChapterCount: 1,
+        initialChapterKeys: ["1024424884:1"],
+      },
+      timestamp
+    );
+    legacy = automationStateApi.beginExport(legacy, timestamp);
+    legacy = automationStateApi.acceptDownload(legacy, 231, timestamp);
+    legacy = automationStateApi.settleDownload(legacy, 231, true, timestamp);
+    legacy = automationStateApi.complete(legacy, timestamp);
+    delete legacy.completedDownloadIds;
+    delete legacy.failedDownloadIds;
+
+    let observed = { state: "in_progress" };
+    const harness = createAutomationHarness({
+      state: legacy,
+      batch: batchFrom([automaticChapter("1")]),
+      inspectDownload: async () => observed,
+    });
+    const exporting = await harness.controller.getState();
+    equal(exporting.status, automationStateApi.STATUS.RUNNING);
+    equal(exporting.phase, automationStateApi.PHASE.EXPORTING);
+    equal(exporting.downloadedFileCount, 0);
+    equal(exporting.pendingFileCount, 1);
+    equal(exporting.batchLocked, true);
+
+    observed = { state: "complete" };
+    const completed = await harness.controller.reconcile();
+    equal(completed.status, automationStateApi.STATUS.COMPLETED);
+    equal(completed.downloadedFileCount, 1);
+    equal(completed.batchLocked, false);
+    equal(harness.downloads.length, 0, "旧会话恢复时重复提交了下载");
+  });
+
+  test("自动状态丢失后本地下载跟踪仍会锁定批次", async () => {
+    let pending = true;
+    const harness = createAutomationHarness({
+      batch: batchFrom([automaticChapter("1")]),
+      getPendingTrackedDownloadCount: async () => (pending ? 1 : 0),
+    });
+    const recoveryView = await harness.controller.getState();
+    equal(recoveryView.recoveryLock, true);
+    equal(recoveryView.pendingFileCount, 1);
+    equal(recoveryView.batchLocked, true);
+    await rejectsCode(
+      () => harness.controller.addChapter(automaticChapter("2")),
+      "AUTOMATION_BATCH_LOCKED"
+    );
+    await rejectsCode(
+      () => harness.controller.clearBatch(),
+      "AUTOMATION_BATCH_LOCKED"
+    );
+    await rejectsCode(
+      () =>
+        harness.controller.start({
+          tabId: 7,
+          targetCount: 1,
+          format: "txt",
+          operationId: "auto-tracker-lock",
+        }),
+      "AUTOMATION_DOWNLOADS_PENDING"
+    );
+    equal((await harness.batchStore.getBatch()).chapters.length, 1);
+
+    pending = false;
+    const cleared = await harness.controller.clearBatch();
+    equal(cleared.clearedCount, 1);
+  });
+
+  test("全部文件已受理后等待终态不再依赖章节批次", async () => {
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    let state = automationStateApi.start(
+      {
+        tabId: 7,
+        targetCount: 1,
+        format: "json",
+        operationId: "auto-wait-without-batch",
+        batchChapterCount: 1,
+        initialChapterKeys: ["1024424884:1"],
+      },
+      timestamp
+    );
+    state = automationStateApi.beginExport(state, timestamp);
+    state = automationStateApi.acceptDownload(state, 241, timestamp);
+    const harness = createAutomationHarness({
+      state,
+      inspectDownload: async () => ({ state: "in_progress" }),
+    });
+
+    const fromPopup = await harness.controller.getState();
+    equal(fromPopup.status, automationStateApi.STATUS.RUNNING);
+    equal(fromPopup.phase, automationStateApi.PHASE.EXPORTING);
+    equal(fromPopup.pendingFileCount, 1);
+    const reconciled = await harness.controller.reconcile();
+    equal(reconciled.status, automationStateApi.STATUS.RUNNING);
+    equal(reconciled.pendingFileCount, 1);
+    equal(harness.downloads.length, 0);
+
+    const completed = await harness.controller.handleDownloadSettled(241, true);
+    equal(completed.status, automationStateApi.STATUS.COMPLETED);
+    equal(completed.downloadedFileCount, 1);
+  });
+
   test("控制器目标两章时等待页面完成后继续且忽略重复完成事件", async () => {
     const harness = createAutomationHarness({
       extractions: [automaticChapter("1", "2"), automaticChapter("2")],
+      downloadIds: [251, 252],
     });
     const first = await harness.controller.start({
       tabId: 7,
@@ -482,11 +753,29 @@
     await harness.controller.handleTabUpdated(7, { status: "loading" });
     await harness.controller.handleTabUpdated(8, { status: "complete" });
     equal(harness.extractionCalls, 1);
-    const completed = await harness.controller.handleTabUpdated(7, {
+    const exporting = await harness.controller.handleTabUpdated(7, {
       status: "complete",
     });
+    equal(exporting.status, automationStateApi.STATUS.RUNNING);
+    equal(exporting.phase, automationStateApi.PHASE.EXPORTING);
+    equal(exporting.capturedCount, 2);
+    equal(exporting.acceptedFileCount, 2);
+    equal(exporting.downloadedFileCount, 0);
+    equal(exporting.pendingFileCount, 2);
+    const partlyCompleted = await harness.controller.handleDownloadSettled(
+      251,
+      true
+    );
+    equal(partlyCompleted.status, automationStateApi.STATUS.RUNNING);
+    equal(partlyCompleted.downloadedFileCount, 1);
+    equal(partlyCompleted.pendingFileCount, 1);
+    const completed = await harness.controller.handleDownloadSettled(
+      252,
+      true
+    );
     equal(completed.status, automationStateApi.STATUS.COMPLETED);
-    equal(completed.capturedCount, 2);
+    equal(completed.downloadedFileCount, 2);
+    equal(completed.pendingFileCount, 0);
     await harness.controller.handleTabUpdated(7, { status: "complete" });
     equal(harness.extractionCalls, 2);
     equal(harness.downloads.length, 2, "每章没有各生成一个下载");
@@ -501,6 +790,7 @@
     const harness = createAutomationHarness({
       batch: batchFrom([firstChapter]),
       extractions: [firstChapter, automaticChapter("2")],
+      downloadIds: [261, 262],
     });
     const waiting = await harness.controller.start({
       tabId: 7,
@@ -513,31 +803,60 @@
     equal(harness.navigations.length, 1);
     equal(harness.delays.length, 1);
 
-    const completed = await harness.controller.handleTabUpdated(7, {
+    const exporting = await harness.controller.handleTabUpdated(7, {
       status: "complete",
     });
-    equal(completed.status, automationStateApi.STATUS.COMPLETED);
-    equal(completed.capturedCount, 2);
+    equal(exporting.status, automationStateApi.STATUS.RUNNING);
+    equal(exporting.phase, automationStateApi.PHASE.EXPORTING);
+    equal(exporting.capturedCount, 2);
+    equal(exporting.acceptedFileCount, 2);
+    equal(exporting.downloadedFileCount, 0);
+    equal(exporting.pendingFileCount, 2);
     equal((await harness.batchStore.getBatch()).chapters.length, 2);
     equal(harness.downloads.length, 2);
+    const partlyCompleted = await harness.controller.handleDownloadSettled(
+      261,
+      true
+    );
+    equal(partlyCompleted.status, automationStateApi.STATUS.RUNNING);
+    equal(partlyCompleted.pendingFileCount, 1);
+    const completed = await harness.controller.handleDownloadSettled(
+      262,
+      true
+    );
+    equal(completed.status, automationStateApi.STATUS.COMPLETED);
+    equal(completed.downloadedFileCount, 2);
+    equal(completed.pendingFileCount, 0);
   });
 
   test("控制器在已有批次等于目标时直接导出", async () => {
     const harness = createAutomationHarness({
       batch: batchFrom([automaticChapter("1")]),
+      downloadId: 271,
     });
-    const completed = await harness.controller.start({
+    const exporting = await harness.controller.start({
       tabId: 7,
       targetCount: 1,
       format: "json",
       operationId: "auto-existing-complete",
     });
-    equal(completed.status, automationStateApi.STATUS.COMPLETED);
-    equal(completed.capturedCount, 1);
+    equal(exporting.status, automationStateApi.STATUS.RUNNING);
+    equal(exporting.phase, automationStateApi.PHASE.EXPORTING);
+    equal(exporting.capturedCount, 1);
+    equal(exporting.acceptedFileCount, 1);
+    equal(exporting.downloadedFileCount, 0);
+    equal(exporting.pendingFileCount, 1);
     equal(harness.extractionCalls, 0, "已达到目标时不应再提取页面");
     equal(harness.navigations.length, 0);
     equal(harness.delays.length, 0);
     equal(harness.downloads.length, 1);
+    const completed = await harness.controller.handleDownloadSettled(
+      271,
+      true
+    );
+    equal(completed.status, automationStateApi.STATUS.COMPLETED);
+    equal(completed.downloadedFileCount, 1);
+    equal(completed.pendingFileCount, 0);
   });
 
   test("验证页会暂停，错误标签页不能继续，回到原标签页后可恢复", async () => {
@@ -550,6 +869,7 @@
           adapterId: "qidian",
         },
       ],
+      downloadId: 281,
     });
     const paused = await harness.controller.start({
       tabId: 7,
@@ -575,14 +895,28 @@
         }),
       "AUTOMATION_TAB_MISMATCH"
     );
-    equal((await harness.controller.getState()).status, automationStateApi.STATUS.PAUSED);
+    equal(
+      (await harness.controller.getState()).status,
+      automationStateApi.STATUS.PAUSED
+    );
     harness.extractionQueue.push(automaticChapter("1"));
-    const completed = await harness.controller.resume({
+    const exporting = await harness.controller.resume({
       tabId: 7,
       operationId: "auto-challenge",
     });
-    equal(completed.status, automationStateApi.STATUS.COMPLETED);
+    equal(exporting.status, automationStateApi.STATUS.RUNNING);
+    equal(exporting.phase, automationStateApi.PHASE.EXPORTING);
+    equal(exporting.acceptedFileCount, 1);
+    equal(exporting.downloadedFileCount, 0);
+    equal(exporting.pendingFileCount, 1);
     equal(harness.downloads.length, 1);
+    const completed = await harness.controller.handleDownloadSettled(
+      281,
+      true
+    );
+    equal(completed.status, automationStateApi.STATUS.COMPLETED);
+    equal(completed.downloadedFileCount, 1);
+    equal(completed.pendingFileCount, 0);
   });
 
   test("页面提取抛错时自动模式失败而不是等待验证", async () => {
@@ -683,13 +1017,31 @@
       state,
       batch: batchFrom([automaticChapter("1", "2")]),
       extractions: [automaticChapter("2")],
+      downloadIds: [291, 292],
     });
-    const completed = await harness.controller.reconcile();
-    equal(completed.status, automationStateApi.STATUS.COMPLETED);
-    equal(completed.capturedCount, 2);
+    const exporting = await harness.controller.reconcile();
+    equal(exporting.status, automationStateApi.STATUS.RUNNING);
+    equal(exporting.phase, automationStateApi.PHASE.EXPORTING);
+    equal(exporting.capturedCount, 2);
+    equal(exporting.acceptedFileCount, 2);
+    equal(exporting.downloadedFileCount, 0);
+    equal(exporting.pendingFileCount, 2);
     equal((await harness.batchStore.getBatch()).chapters.length, 2);
     equal(harness.extractionCalls, 1);
     equal(harness.downloads.length, 2);
+    const partlyCompleted = await harness.controller.handleDownloadSettled(
+      291,
+      true
+    );
+    equal(partlyCompleted.status, automationStateApi.STATUS.RUNNING);
+    equal(partlyCompleted.pendingFileCount, 1);
+    const completed = await harness.controller.handleDownloadSettled(
+      292,
+      true
+    );
+    equal(completed.status, automationStateApi.STATUS.COMPLETED);
+    equal(completed.downloadedFileCount, 2);
+    equal(completed.pendingFileCount, 0);
   });
 
   test("导出阶段已有部分下载时恢复只提交剩余章节文件", async () => {
@@ -725,17 +1077,31 @@
       batch: batchFrom([automaticChapter("1", "2"), automaticChapter("2")]),
       downloadId: 89,
     });
-    const completed = await harness.controller.reconcile();
-    equal(completed.status, automationStateApi.STATUS.COMPLETED);
-    equal(completed.downloadedFileCount, 2);
-    const internalCompleted = await automationStateApi.load(
+    const exporting = await harness.controller.reconcile();
+    equal(exporting.status, automationStateApi.STATUS.RUNNING);
+    equal(exporting.phase, automationStateApi.PHASE.EXPORTING);
+    equal(exporting.acceptedFileCount, 2);
+    equal(exporting.downloadedFileCount, 0);
+    equal(exporting.pendingFileCount, 2);
+    const internalExporting = await automationStateApi.load(
       harness.sessionStorage
     );
-    equal(internalCompleted.downloadIds.length, 2);
-    equal(internalCompleted.downloadIds[0], 88);
-    equal(internalCompleted.downloadIds[1], 89);
+    equal(internalExporting.downloadIds.length, 2);
+    equal(internalExporting.downloadIds[0], 88);
+    equal(internalExporting.downloadIds[1], 89);
     equal(harness.downloads.length, 1, "没有只补交剩余章节文件");
     equal(harness.downloads[0].metadata.fileIndex, 2);
+    const partlyCompleted = await harness.controller.handleDownloadSettled(
+      88,
+      true
+    );
+    equal(partlyCompleted.status, automationStateApi.STATUS.RUNNING);
+    equal(partlyCompleted.downloadedFileCount, 1);
+    equal(partlyCompleted.pendingFileCount, 1);
+    const completed = await harness.controller.handleDownloadSettled(89, true);
+    equal(completed.status, automationStateApi.STATUS.COMPLETED);
+    equal(completed.downloadedFileCount, 2);
+    equal(completed.pendingFileCount, 0);
     await harness.controller.reconcile();
     equal(harness.downloads.length, 1);
   });
@@ -832,6 +1198,7 @@
       "text/html"
     );
     const pending = pageReadinessApi.wait(documentNode, pageUrl, {
+      stabilityMs: 40,
       timeoutMs: 1000,
     });
     setTimeout(() => {
@@ -848,6 +1215,47 @@
     assert(result.ok, result.error);
     equal(result.paragraphs.length, 1);
     equal(result.paragraphs[0], "延迟挂载的正文。");
+  });
+
+  test("页面等待器会等待渐进挂载的正文稳定", async () => {
+    const pageUrl =
+      "https://www.qidian.com/chapter/1024424884/592692588/";
+    const documentNode = new DOMParser().parseFromString(
+      `<!doctype html>
+       <html>
+         <head><title>第1章 引子_《铁血残明》</title></head>
+         <body>
+           <a class="text-s-gray-900" href="/book/1024424884/">铁血残明</a>
+           <main id="c-592692588">
+             <h1 class="title">第1章 引子</h1>
+             <span class="content-text">先挂载的正文。</span>
+           </main>
+         </body>
+       </html>`,
+      "text/html"
+    );
+    let settled = false;
+    const pending = pageReadinessApi
+      .wait(documentNode, pageUrl, {
+        stabilityMs: 40,
+        timeoutMs: 1000,
+      })
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+
+    await Promise.resolve();
+    assert(!settled, "首段出现后不应立即判定正文就绪");
+    const secondParagraph = documentNode.createElement("span");
+    secondParagraph.className = "content-text";
+    secondParagraph.textContent = "随后挂载的正文。";
+    documentNode.querySelector("main").append(secondParagraph);
+
+    const result = await pending;
+    assert(result.ok, result.error);
+    equal(result.paragraphs.length, 2);
+    equal(result.paragraphs[1], "随后挂载的正文。");
   });
 
   test("页面等待器按需等待下一章链接延迟挂载", async () => {
@@ -869,6 +1277,7 @@
     );
     const pending = pageReadinessApi.wait(documentNode, pageUrl, {
       requireNext: true,
+      stabilityMs: 40,
       timeoutMs: 1000,
     });
     setTimeout(() => {

@@ -18,6 +18,14 @@
     const extractPage = options?.extractPage;
     const navigateTab = options?.navigateTab;
     const getTab = options?.getTab;
+    const inspectDownload =
+      typeof options?.inspectDownload === "function"
+        ? options.inspectDownload
+        : async () => null;
+    const getPendingTrackedDownloadCount =
+      typeof options?.getPendingTrackedDownloadCount === "function"
+        ? options.getPendingTrackedDownloadCount
+        : async () => 0;
     const downloadExport = options?.downloadExport;
     const record = options?.record;
     const setBadge = options?.setBadge;
@@ -88,11 +96,85 @@
       );
     }
 
+    function pendingDownloadCount(state) {
+      if (!state) {
+        return 0;
+      }
+      return Math.max(
+        0,
+        state.downloadIds.length -
+          state.completedDownloadIds.length -
+          state.failedDownloadIds.length
+      );
+    }
+
+    function locksBatch(state) {
+      return isActive(state) || pendingDownloadCount(state) > 0;
+    }
+
+    async function pendingTrackedDownloadCount() {
+      const count = Number(await getPendingTrackedDownloadCount());
+      return Number.isSafeInteger(count) && count > 0 ? count : 0;
+    }
+
+    function trackedDownloadLockView(pendingFileCount) {
+      return {
+        status: "idle",
+        phase: "idle",
+        active: false,
+        recoveryLock: true,
+        capturedCount: 0,
+        targetCount: 0,
+        acceptedFileCount: pendingFileCount,
+        downloadedFileCount: 0,
+        failedFileCount: 0,
+        pendingFileCount,
+        batchLocked: true,
+        lastError: null,
+      };
+    }
+
     function stableReason(error, fallback) {
       const code = String(error?.code || fallback || "automation-failed")
         .replace(/[^A-Za-z0-9_-]/g, "-")
         .slice(0, 120);
       return code || "automation-failed";
+    }
+
+    function terminalDownloadResult(value) {
+      if (!value || typeof value !== "object") {
+        return null;
+      }
+      if (value.terminal && typeof value.terminal.completed === "boolean") {
+        return {
+          completed: value.terminal.completed,
+          reason: value.terminal.reason || null,
+        };
+      }
+      if (value.state === "complete") {
+        return { completed: true, reason: null };
+      }
+      if (value.state === "interrupted" || value.error) {
+        return {
+          completed: false,
+          reason: value.error || value.reason || "interrupted",
+        };
+      }
+      return null;
+    }
+
+    function normalizeDownloadResult(value) {
+      const downloadId = Number.isInteger(value) ? value : value?.downloadId;
+      if (!Number.isInteger(downloadId) || downloadId < 0) {
+        throw createError(
+          "AUTOMATION_DOWNLOAD_ID_INVALID",
+          "浏览器没有返回有效的下载编号。"
+        );
+      }
+      return {
+        downloadId,
+        terminal: terminalDownloadResult(value),
+      };
     }
 
     async function persist(state) {
@@ -204,7 +286,118 @@
       return recovered;
     }
 
+    async function finalizeDownloadsUnlocked(state) {
+      if (
+        !isActive(state) ||
+        state.status !== stateApi.STATUS.RUNNING ||
+        state.phase !== stateApi.PHASE.EXPORTING
+      ) {
+        return state;
+      }
+      if (state.failedDownloadIds.length > 0) {
+        await safeRecord(
+          "EXPORT_FAILED",
+          state,
+          {
+            format: state.format,
+            chapterCount: state.targetCount,
+            fileCount: state.targetCount,
+            acceptedCount: state.downloadIds.length,
+            failedCount: state.failedDownloadIds.length,
+            reason: "download-terminal-failed",
+          },
+          `automation:${state.operationId}:terminal-download-failure`
+        );
+        return failUnlocked(
+          state,
+          "AUTOMATION_DOWNLOAD_FAILED",
+          `${state.failedDownloadIds.length} 个章节文件下载失败；当前批次仍保留，可在处理下载问题后重试。`,
+          "download-terminal-failed"
+        );
+      }
+      if (state.downloadIds.length !== state.targetCount) {
+        return state;
+      }
+      const settledCount =
+        state.completedDownloadIds.length + state.failedDownloadIds.length;
+      if (settledCount !== state.downloadIds.length) {
+        return state;
+      }
+
+      try {
+        const completed = stateApi.complete(state, now());
+        try {
+          await persist(completed);
+        } catch {
+          await persist(completed);
+        }
+        await safeSetBadge(completed);
+        await safeRecord("AUTOMATION_COMPLETED", completed, {
+          capturedCount: completed.capturedCount,
+          targetCount: completed.targetCount,
+          format: completed.format,
+          downloadCount: completed.completedDownloadIds.length,
+        });
+        return completed;
+      } catch (error) {
+        await safeRecord("WORKER_UNHANDLED_ERROR", state, {
+          reason: stableReason(error, "automation-completion-save-failed"),
+        });
+        throw error;
+      }
+    }
+
+    async function synchronizeDownloadResultsUnlocked(state) {
+      if (!state || pendingDownloadCount(state) === 0) {
+        return state;
+      }
+      const settledIds = new Set([
+        ...state.completedDownloadIds,
+        ...state.failedDownloadIds,
+      ]);
+      const pendingIds = state.downloadIds.filter(
+        (downloadId) => !settledIds.has(downloadId)
+      );
+      if (pendingIds.length === 0) {
+        return state;
+      }
+      const observations = await Promise.all(
+        pendingIds.map((downloadId) =>
+          Promise.resolve(inspectDownload(downloadId)).catch(() => null)
+        )
+      );
+      let synchronized = state;
+      for (let index = 0; index < pendingIds.length; index += 1) {
+        const terminal = terminalDownloadResult(observations[index]);
+        if (!terminal) {
+          continue;
+        }
+        synchronized = stateApi.settleDownload(
+          synchronized,
+          pendingIds[index],
+          terminal.completed,
+          now()
+        );
+      }
+      if (synchronized !== state) {
+        await persist(synchronized);
+        await safeSetBadge(synchronized);
+      }
+      return synchronized;
+    }
+
+    async function refreshDownloadStateUnlocked(state) {
+      const synchronized = await synchronizeDownloadResultsUnlocked(state);
+      return finalizeDownloadsUnlocked(synchronized);
+    }
+
     async function exportUnlocked(state, batch) {
+      if (
+        state.phase === stateApi.PHASE.EXPORTING &&
+        state.downloadIds.length === state.targetCount
+      ) {
+        return refreshDownloadStateUnlocked(state);
+      }
       const chapters = batchChapters(batch);
       if (chapters.length !== state.targetCount) {
         return failUnlocked(
@@ -263,6 +456,14 @@
         );
       }
 
+      if (state.downloadIds.length > 0) {
+        const finalized = await refreshDownloadStateUnlocked(state);
+        if (!isActive(finalized)) {
+          return finalized;
+        }
+        state = finalized;
+      }
+
       for (
         let index = state.downloadIds.length;
         index < exports.length;
@@ -270,14 +471,31 @@
       ) {
         const exported = exports[index];
         try {
-          const downloadId = await downloadExport(exported, state.operationId, {
-            startedAt: state.timestamps.startedAt,
-            fileIndex: exported.fileIndex,
-            fileCount: exported.fileCount,
-          });
-          state = stateApi.acceptDownload(state, downloadId, now());
+          const downloadResult = normalizeDownloadResult(
+            await downloadExport(exported, state.operationId, {
+              startedAt: state.timestamps.startedAt,
+              fileIndex: exported.fileIndex,
+              fileCount: exported.fileCount,
+            })
+          );
+          state = stateApi.acceptDownload(
+            state,
+            downloadResult.downloadId,
+            now()
+          );
+          if (downloadResult.terminal) {
+            state = stateApi.settleDownload(
+              state,
+              downloadResult.downloadId,
+              downloadResult.terminal.completed,
+              now()
+            );
+          }
           await persist(state);
           await safeSetBadge(state);
+          if (state.failedDownloadIds.length > 0) {
+            return finalizeDownloadsUnlocked(state);
+          }
         } catch (error) {
           const reason = stableReason(error, "automatic-download-rejected");
           await safeRecord("DOWNLOAD_REJECTED", state, {
@@ -296,28 +514,7 @@
           );
         }
       }
-
-      try {
-        const completed = stateApi.complete(state, now());
-        try {
-          await persist(completed);
-        } catch {
-          await persist(completed);
-        }
-        await safeSetBadge(completed);
-        await safeRecord("AUTOMATION_COMPLETED", completed, {
-          capturedCount: completed.capturedCount,
-          targetCount: completed.targetCount,
-          format: completed.format,
-          downloadCount: completed.downloadIds.length,
-        });
-        return completed;
-      } catch (error) {
-        await safeRecord("WORKER_UNHANDLED_ERROR", state, {
-          reason: stableReason(error, "automation-completion-save-failed"),
-        });
-        throw error;
-      }
+      return finalizeDownloadsUnlocked(state);
     }
 
     async function continueAfterCaptureUnlocked(state, extraction, batch) {
@@ -530,11 +727,21 @@
 
     function getState() {
       return enqueue(async () => {
-        const current = await stateApi.load(storageArea);
+        let current = await stateApi.load(storageArea);
+        current = await refreshDownloadStateUnlocked(current);
+        if (!current) {
+          const trackedCount = await pendingTrackedDownloadCount();
+          return trackedCount > 0
+            ? trackedDownloadLockView(trackedCount)
+            : null;
+        }
         if (
           current?.status === stateApi.STATUS.RUNNING &&
           current.phase === stateApi.PHASE.EXPORTING
         ) {
+          if (current.downloadIds.length === current.targetCount) {
+            return publicView(current);
+          }
           const batch = await batchStore.getBatch();
           return publicView(await exportUnlocked(current, batch));
         }
@@ -544,11 +751,24 @@
 
     function start(options = {}) {
       return enqueue(async () => {
-        const existing = await stateApi.load(storageArea);
+        let existing = await stateApi.load(storageArea);
+        existing = await refreshDownloadStateUnlocked(existing);
         if (isActive(existing)) {
           throw createError(
             "AUTOMATION_ALREADY_ACTIVE",
             "已有自动模式任务正在运行或等待验证。"
+          );
+        }
+        if (pendingDownloadCount(existing) > 0) {
+          throw createError(
+            "AUTOMATION_DOWNLOADS_PENDING",
+            "上一自动任务仍有浏览器下载未结束，请等待下载完成或失败后再重试。"
+          );
+        }
+        if ((await pendingTrackedDownloadCount()) > 0) {
+          throw createError(
+            "AUTOMATION_DOWNLOADS_PENDING",
+            "浏览器仍有自动导出的文件未结束，请等待下载完成或失败后再重试。"
           );
         }
         const batch = await batchStore.getBatch();
@@ -649,6 +869,57 @@
       });
     }
 
+    function handleDownloadSettled(downloadId, completed) {
+      return enqueue(async () => {
+        const current = await stateApi.load(storageArea);
+        if (
+          !current ||
+          !current.downloadIds.includes(downloadId)
+        ) {
+          return current ? publicView(current) : null;
+        }
+        const settled = stateApi.settleDownload(
+          current,
+          downloadId,
+          Boolean(completed),
+          now()
+        );
+        if (settled !== current) {
+          await persist(settled);
+          await safeSetBadge(settled);
+        }
+        return publicView(await finalizeDownloadsUnlocked(settled));
+      });
+    }
+
+    function clearBatch() {
+      return enqueue(async () => {
+        let current = await stateApi.load(storageArea);
+        current = await refreshDownloadStateUnlocked(current);
+        if (locksBatch(current) || (await pendingTrackedDownloadCount()) > 0) {
+          throw createError(
+            "AUTOMATION_BATCH_LOCKED",
+            "自动任务或浏览器下载尚未结束，当前批次不能清空。"
+          );
+        }
+        return batchStore.clearBatch();
+      });
+    }
+
+    function addChapter(chapter) {
+      return enqueue(async () => {
+        let current = await stateApi.load(storageArea);
+        current = await refreshDownloadStateUnlocked(current);
+        if (locksBatch(current) || (await pendingTrackedDownloadCount()) > 0) {
+          throw createError(
+            "AUTOMATION_BATCH_LOCKED",
+            "自动任务或浏览器下载尚未结束，当前批次不能修改。"
+          );
+        }
+        return batchStore.addChapter(chapter);
+      });
+    }
+
     function handleTabUpdated(tabId, changeInfo = {}, tab = null) {
       return enqueue(async () => {
         if (changeInfo.status !== "complete") {
@@ -682,8 +953,15 @@
           return current ? publicView(current) : null;
         }
         if (current.phase === stateApi.PHASE.EXPORTING) {
+          const refreshed = await refreshDownloadStateUnlocked(current);
+          if (
+            !isActive(refreshed) ||
+            refreshed.downloadIds.length === refreshed.targetCount
+          ) {
+            return publicView(refreshed);
+          }
           const batch = await batchStore.getBatch();
-          return publicView(await exportUnlocked(current, batch));
+          return publicView(await exportUnlocked(refreshed, batch));
         }
         const failed = await failUnlocked(
           current,
@@ -697,11 +975,12 @@
 
     function reconcile() {
       return enqueue(async () => {
-        const current = await stateApi.load(storageArea);
+        let current = await stateApi.load(storageArea);
         if (!current) {
           await safeSetBadge(null);
           return null;
         }
+        current = await refreshDownloadStateUnlocked(current);
         if (!isActive(current)) {
           await safeSetBadge(current);
           return publicView(current);
@@ -712,6 +991,9 @@
         }
 
         if (current.phase === stateApi.PHASE.EXPORTING) {
+          if (current.downloadIds.length === current.targetCount) {
+            return publicView(current);
+          }
           let batch;
           try {
             batch = await batchStore.getBatch();
@@ -772,6 +1054,9 @@
       start,
       resume,
       stop,
+      addChapter,
+      clearBatch,
+      handleDownloadSettled,
       handleTabUpdated,
       handleTabRemoved,
       reconcile,

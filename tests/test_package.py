@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,18 +24,206 @@ from project import (  # noqa: E402
 )
 
 
+def isolated_git_environment(
+    global_config: Path,
+    global_attributes: Path,
+    hooks_directory: Path,
+    template_directory: Path,
+) -> dict[str, str]:
+    environment = os.environ.copy()
+    direct_overrides = {
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_LOCAL",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_DIR",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_TEMPLATE_DIR",
+    }
+    for name in tuple(environment):
+        if (
+            name in direct_overrides
+            or name.startswith("GIT_CONFIG_KEY_")
+            or name.startswith("GIT_CONFIG_VALUE_")
+        ):
+            environment.pop(name)
+
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": str(global_config),
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_TEMPLATE_DIR": str(template_directory),
+        }
+    )
+    command_config = (
+        ("core.hooksPath", hooks_directory),
+        ("core.attributesFile", global_attributes),
+        ("init.templateDir", template_directory),
+    )
+    environment["GIT_CONFIG_COUNT"] = str(len(command_config))
+    for index, (key, value) in enumerate(command_config):
+        environment[f"GIT_CONFIG_KEY_{index}"] = key
+        environment[f"GIT_CONFIG_VALUE_{index}"] = str(value)
+    return environment
+
+
 class PackageTests(unittest.TestCase):
+    def require_git(self) -> str:
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("Git 不可用，无法验证不同 core.autocrlf checkout 的产物。")
+        try:
+            completed = subprocess.run(
+                [git, "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as error:
+            self.skipTest(
+                "Git 不可用，无法验证不同 core.autocrlf checkout 的产物："
+                f"{error}"
+            )
+        if completed.returncode != 0:
+            self.skipTest(
+                "Git 不可用，无法验证不同 core.autocrlf checkout 的产物："
+                f"{completed.stderr.strip()}"
+            )
+        return git
+
+    def run_git(
+        self,
+        git: str,
+        *arguments: str,
+        cwd: Path | None = None,
+        environment: dict[str, str] | None = None,
+    ) -> None:
+        subprocess.run(
+            [git, *arguments],
+            cwd=cwd,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
     def test_package_is_reproducible_and_loadable(self) -> None:
+        git = self.require_git()
         with tempfile.TemporaryDirectory() as directory:
             temporary_root = Path(directory)
-            shutil.copytree(PROJECT_ROOT / "extension", temporary_root / "extension")
-            first = build_package(temporary_root, temporary_root / "dist-one")
-            second = build_package(temporary_root, temporary_root / "dist-two")
+            repository = temporary_root / "repository"
+            global_config = temporary_root / "empty-gitconfig"
+            global_attributes = temporary_root / "empty-attributes"
+            empty_hooks = temporary_root / "empty-hooks"
+            empty_template = temporary_root / "empty-template"
+            repository.mkdir()
+            empty_hooks.mkdir()
+            empty_template.mkdir()
+            global_config.write_text("", encoding="utf-8", newline="\n")
+            global_attributes.write_text("", encoding="utf-8", newline="\n")
+            git_environment = isolated_git_environment(
+                global_config,
+                global_attributes,
+                empty_hooks,
+                empty_template,
+            )
+            shutil.copytree(PROJECT_ROOT / "extension", repository / "extension")
+            shutil.copy2(
+                PROJECT_ROOT / ".gitattributes",
+                repository / ".gitattributes",
+            )
+            self.run_git(
+                git,
+                "init",
+                ".",
+                cwd=repository,
+                environment=git_environment,
+            )
+            self.run_git(
+                git,
+                "config",
+                "--local",
+                "core.autocrlf",
+                "false",
+                cwd=repository,
+                environment=git_environment,
+            )
+            self.run_git(
+                git,
+                "add",
+                "--",
+                ".gitattributes",
+                "extension",
+                cwd=repository,
+                environment=git_environment,
+            )
+            self.run_git(
+                git,
+                "-c",
+                "user.name=QidianCrawler Tests",
+                "-c",
+                "user.email=tests@qidiancrawler.invalid",
+                "commit",
+                "--no-gpg-sign",
+                "-m",
+                "Create packaging fixture",
+                cwd=repository,
+                environment=git_environment,
+            )
+
+            checkouts: dict[str, Path] = {}
+            for autocrlf in ("true", "false"):
+                checkout = temporary_root / f"checkout-{autocrlf}"
+                self.run_git(
+                    git,
+                    "clone",
+                    "--no-checkout",
+                    str(repository),
+                    str(checkout),
+                    environment=git_environment,
+                )
+                self.run_git(
+                    git,
+                    "config",
+                    "--local",
+                    "core.autocrlf",
+                    autocrlf,
+                    cwd=checkout,
+                    environment=git_environment,
+                )
+                self.run_git(
+                    git,
+                    "checkout",
+                    "--force",
+                    "HEAD",
+                    cwd=checkout,
+                    environment=git_environment,
+                )
+                checkouts[autocrlf] = checkout
+
+            first_root = checkouts["true"]
+            second_root = checkouts["false"]
+            first = build_package(first_root, first_root / "dist")
+            second = build_package(second_root, second_root / "dist")
 
             first_bytes = first.archive.read_bytes()
             second_bytes = second.archive.read_bytes()
             self.assertEqual(first_bytes, second_bytes)
             self.assertEqual(first.sha256, hashlib.sha256(first_bytes).hexdigest())
+            self.assertEqual(second.sha256, hashlib.sha256(second_bytes).hexdigest())
             self.assertEqual(first.sha256, second.sha256)
 
             self.assertEqual(
@@ -44,8 +234,8 @@ class PackageTests(unittest.TestCase):
             with zipfile.ZipFile(first.archive, "r") as archive:
                 names = archive.namelist()
                 expected_names = sorted(
-                    path.relative_to(temporary_root / "extension").as_posix()
-                    for path in (temporary_root / "extension").rglob("*")
+                    path.relative_to(first_root / "extension").as_posix()
+                    for path in (first_root / "extension").rglob("*")
                     if path.is_file()
                 )
                 self.assertEqual(names, expected_names)
@@ -70,7 +260,7 @@ class PackageTests(unittest.TestCase):
                     self.assertEqual(info.external_attr, 0o100644 << 16)
                     self.assertEqual(
                         archive.read(info.filename),
-                        (temporary_root / "extension" / info.filename).read_bytes(),
+                        (first_root / "extension" / info.filename).read_bytes(),
                     )
 
             self.assertTrue((first.staging_directory / "manifest.json").is_file())
@@ -111,6 +301,7 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shutil.copytree(PROJECT_ROOT / "extension", root / "extension")
+            shutil.copy2(PROJECT_ROOT / ".gitattributes", root / ".gitattributes")
             dist = root / "dist"
             protected = dist / "must-survive"
             protected.mkdir(parents=True)

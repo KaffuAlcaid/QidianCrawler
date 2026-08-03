@@ -26,6 +26,11 @@ from project import (  # noqa: E402
 )
 
 
+def copy_validation_fixture(destination: Path) -> None:
+    shutil.copytree(PROJECT_ROOT / "extension", destination / "extension")
+    shutil.copy2(PROJECT_ROOT / ".gitattributes", destination / ".gitattributes")
+
+
 class ManifestTests(unittest.TestCase):
     def test_current_extension_passes_static_validation(self) -> None:
         report = validate_project(PROJECT_ROOT)
@@ -61,7 +66,7 @@ class ManifestTests(unittest.TestCase):
     def test_validator_rejects_extra_permission(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary_root = Path(directory)
-            shutil.copytree(PROJECT_ROOT / "extension", temporary_root / "extension")
+            copy_validation_fixture(temporary_root)
             manifest_path = temporary_root / "extension" / "manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["permissions"].append("tabs")
@@ -76,7 +81,7 @@ class ManifestTests(unittest.TestCase):
     def test_validator_tracks_execute_script_file_references(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary_root = Path(directory)
-            shutil.copytree(PROJECT_ROOT / "extension", temporary_root / "extension")
+            copy_validation_fixture(temporary_root)
             popup_path = temporary_root / "extension" / "popup.js"
             popup_source = popup_path.read_text(encoding="utf-8")
             popup_path.write_text(
@@ -95,7 +100,7 @@ class ManifestTests(unittest.TestCase):
     def test_validator_tracks_offscreen_document_reference(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary_root = Path(directory)
-            shutil.copytree(PROJECT_ROOT / "extension", temporary_root / "extension")
+            copy_validation_fixture(temporary_root)
             background_path = temporary_root / "extension" / "background.js"
             background_source = background_path.read_text(encoding="utf-8")
             background_path.write_text(
@@ -114,13 +119,35 @@ class ManifestTests(unittest.TestCase):
     def test_validator_rejects_undeclared_publishable_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary_root = Path(directory)
-            shutil.copytree(PROJECT_ROOT / "extension", temporary_root / "extension")
+            copy_validation_fixture(temporary_root)
             (temporary_root / "extension" / "debug.json").write_text(
                 '{"private": true}\n', encoding="utf-8", newline="\n"
             )
             with self.assertRaises(ProjectValidationError) as context:
                 validate_project(temporary_root)
             self.assertIn("PACKAGE_FILE_UNDECLARED", str(context.exception))
+
+    def test_validator_rejects_invalid_gitattributes_root_rule(self) -> None:
+        invalid_contents = {
+            "missing": None,
+            "split-eol-value": b"* text=auto eol=l\r\nf",
+            "unsupported-eol-value": b"* text=auto eol=native\n",
+            "project-requires-lf": b"* text=auto eol=crlf\n",
+            "crlf-file-line-ending": b"* text=auto eol=lf\r\n",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            copy_validation_fixture(temporary_root)
+            attributes_path = temporary_root / ".gitattributes"
+            for case, content in invalid_contents.items():
+                with self.subTest(case=case):
+                    if content is None:
+                        attributes_path.unlink(missing_ok=True)
+                    else:
+                        attributes_path.write_bytes(content)
+                    with self.assertRaises(ProjectValidationError) as context:
+                        validate_project(temporary_root)
+                    self.assertIn("GITATTRIBUTES_INVALID", str(context.exception))
 
     def test_explicit_browser_path_does_not_fall_back(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

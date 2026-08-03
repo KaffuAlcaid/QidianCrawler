@@ -252,17 +252,33 @@
       state.timestamps && typeof state.timestamps === "object"
         ? state.timestamps
         : {};
+    const downloadIds = normalizeDownloadIds(state.downloadIds, state.downloadId);
+    // 旧状态把“浏览器已受理”当作完成；恢复为导出中后再查询真实终态。
+    const legacyAcceptedOnlyCompletion =
+      compact(state.status) === STATUS.COMPLETED &&
+      state.completedDownloadIds === undefined;
+    const status = legacyAcceptedOnlyCompletion
+      ? STATUS.RUNNING
+      : compact(state.status);
+    const phase = legacyAcceptedOnlyCompletion
+      ? PHASE.EXPORTING
+      : compact(state.phase);
     const normalized = {
       schemaVersion: integer(state.schemaVersion),
       kind: compact(state.kind),
       tabId: integer(state.tabId),
       targetCount: integer(state.targetCount),
       format: normalizeFormat(state.format),
-      status: compact(state.status),
-      phase: compact(state.phase),
+      status,
+      phase,
       capturedCount: integer(state.capturedCount),
       operationId: normalizeOperationId(state.operationId),
-      downloadIds: normalizeDownloadIds(state.downloadIds, state.downloadId),
+      downloadIds,
+      completedDownloadIds: normalizeDownloadIds(
+        state.completedDownloadIds,
+        null
+      ),
+      failedDownloadIds: normalizeDownloadIds(state.failedDownloadIds, null),
       nextNavigationUrl: normalizeNextNavigationUrl(
         state.nextNavigationUrl
       ),
@@ -274,9 +290,13 @@
         updatedAt: normalizeTimestamp(sourceTimestamps.updatedAt, true),
         lastProgressAt: normalizeTimestamp(sourceTimestamps.lastProgressAt),
         pausedAt: normalizeTimestamp(sourceTimestamps.pausedAt),
-        finishedAt: normalizeTimestamp(sourceTimestamps.finishedAt),
+        finishedAt: legacyAcceptedOnlyCompletion
+          ? null
+          : normalizeTimestamp(sourceTimestamps.finishedAt),
       },
-      lastError: normalizeLastError(state.lastError),
+      lastError: legacyAcceptedOnlyCompletion
+        ? null
+        : normalizeLastError(state.lastError),
     };
     return normalized;
   }
@@ -354,6 +374,26 @@
         "自动模式下载文件数超过目标章数。"
       );
     }
+    const acceptedDownloadIds = new Set(normalized.downloadIds);
+    const completedDownloadIds = new Set(normalized.completedDownloadIds);
+    const failedDownloadIds = new Set(normalized.failedDownloadIds);
+    if (
+      normalized.completedDownloadIds.some(
+        (downloadId) => !acceptedDownloadIds.has(downloadId)
+      ) ||
+      normalized.failedDownloadIds.some(
+        (downloadId) =>
+          !acceptedDownloadIds.has(downloadId) ||
+          completedDownloadIds.has(downloadId)
+      ) ||
+      completedDownloadIds.size !== normalized.completedDownloadIds.length ||
+      failedDownloadIds.size !== normalized.failedDownloadIds.length
+    ) {
+      return validationFailure(
+        ERROR_CODES.INVALID_STATE,
+        "自动模式下载终态记录与已受理下载不一致。"
+      );
+    }
     if (
       normalized.capturedCount === null ||
       normalized.capturedCount < 0 ||
@@ -422,7 +462,9 @@
     if (
       normalized.status === STATUS.COMPLETED &&
       (normalized.capturedCount !== normalized.targetCount ||
-        normalized.downloadIds.length !== normalized.targetCount)
+        normalized.downloadIds.length !== normalized.targetCount ||
+        normalized.completedDownloadIds.length !== normalized.targetCount ||
+        normalized.failedDownloadIds.length !== 0)
     ) {
       return validationFailure(
         ERROR_CODES.TARGET_NOT_REACHED,
@@ -430,7 +472,9 @@
       );
     }
     if (
-      normalized.downloadIds.length > 0 &&
+      (normalized.downloadIds.length > 0 ||
+        normalized.completedDownloadIds.length > 0 ||
+        normalized.failedDownloadIds.length > 0) &&
       ![
         PHASE.EXPORTING,
         PHASE.COMPLETED,
@@ -553,6 +597,8 @@
       capturedCount: batchChapterCount,
       operationId,
       downloadIds: [],
+      completedDownloadIds: [],
+      failedDownloadIds: [],
       nextNavigationUrl: null,
       visitedChapterKeys: initialChapterKeys,
       timestamps: {
@@ -736,6 +782,51 @@
     });
   }
 
+  function settleDownload(state, downloadId, completed, now) {
+    const current = assertValid(state);
+    if (
+      ![
+        PHASE.EXPORTING,
+        PHASE.STOPPED,
+        PHASE.COMPLETED,
+        PHASE.FAILED,
+      ].includes(current.phase)
+    ) {
+      throw automationError(
+        ERROR_CODES.INVALID_TRANSITION,
+        "当前自动模式阶段不能记录下载终态。"
+      );
+    }
+    const normalizedDownloadId = integer(downloadId);
+    if (
+      normalizedDownloadId === null ||
+      normalizedDownloadId < 0 ||
+      !current.downloadIds.includes(normalizedDownloadId)
+    ) {
+      throw automationError(
+        ERROR_CODES.INVALID_STATE,
+        "下载终态对应的下载编号无效。"
+      );
+    }
+    if (
+      current.completedDownloadIds.includes(normalizedDownloadId) ||
+      current.failedDownloadIds.includes(normalizedDownloadId)
+    ) {
+      return current;
+    }
+    const timestamp = currentTimestamp(now);
+    return assertValid({
+      ...current,
+      completedDownloadIds: completed
+        ? [...current.completedDownloadIds, normalizedDownloadId]
+        : current.completedDownloadIds,
+      failedDownloadIds: completed
+        ? current.failedDownloadIds
+        : [...current.failedDownloadIds, normalizedDownloadId],
+      timestamps: { ...current.timestamps, updatedAt: timestamp },
+    });
+  }
+
   function pauseForChallenge(state, error, now) {
     const current = assertActive(state, [
       PHASE.CAPTURING,
@@ -816,7 +907,9 @@
     const current = assertActive(state, [PHASE.EXPORTING]);
     if (
       current.capturedCount !== current.targetCount ||
-      current.downloadIds.length !== current.targetCount
+      current.downloadIds.length !== current.targetCount ||
+      current.completedDownloadIds.length !== current.targetCount ||
+      current.failedDownloadIds.length !== 0
     ) {
       throw automationError(
         ERROR_CODES.TARGET_NOT_REACHED,
@@ -875,12 +968,27 @@
       nextNavigationUrl: _privateNavigationUrl,
       visitedChapterKeys: _privateVisitedChapterKeys,
       downloadIds: _privateDownloadIds,
+      completedDownloadIds: _privateCompletedDownloadIds,
+      failedDownloadIds: _privateFailedDownloadIds,
       ...publicState
     } = current;
+    const acceptedFileCount = current.downloadIds.length;
+    const downloadedFileCount = current.completedDownloadIds.length;
+    const failedFileCount = current.failedDownloadIds.length;
+    const pendingFileCount = Math.max(
+      0,
+      acceptedFileCount - downloadedFileCount - failedFileCount
+    );
     return {
       ...publicState,
       capturedCount,
-      downloadedFileCount: current.downloadIds.length,
+      acceptedFileCount,
+      downloadedFileCount,
+      failedFileCount,
+      pendingFileCount,
+      batchLocked:
+        [STATUS.RUNNING, STATUS.PAUSED].includes(current.status) ||
+        pendingFileCount > 0,
       timestamps: { ...publicState.timestamps },
       lastError: publicState.lastError ? { ...publicState.lastError } : null,
     };
@@ -975,6 +1083,7 @@
     beginCapture,
     beginExport,
     acceptDownload,
+    settleDownload,
     pauseForChallenge,
     resume,
     stop,

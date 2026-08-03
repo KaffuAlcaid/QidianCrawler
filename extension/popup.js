@@ -108,12 +108,47 @@
   }
 
   function getDownloadedFileCount(state) {
-    return Math.max(0, Number(state?.downloadedFileCount || 0) || 0);
+    return Math.max(
+      0,
+      Number(
+        state?.downloadedFileCount ?? state?.completedDownloadIds?.length ?? 0
+      ) || 0
+    );
+  }
+
+  function getAcceptedFileCount(state) {
+    return Math.max(
+      0,
+      Number(state?.acceptedFileCount ?? state?.downloadIds?.length ?? 0) || 0
+    );
+  }
+
+  function getFailedFileCount(state) {
+    return Math.max(
+      0,
+      Number(state?.failedFileCount ?? state?.failedDownloadIds?.length ?? 0) ||
+        0
+    );
+  }
+
+  function getPendingFileCount(state) {
+    const derived = Math.max(
+      0,
+      getAcceptedFileCount(state) -
+        getDownloadedFileCount(state) -
+        getFailedFileCount(state)
+    );
+    return Math.max(0, Number(state?.pendingFileCount ?? derived) || 0);
   }
 
   function automationLocksBatch() {
-    return ["running", "paused", "exporting", "stopping"].includes(
-      getAutomationPhase(automationState)
+    if (typeof automationState?.batchLocked === "boolean") {
+      return automationState.batchLocked;
+    }
+    return (
+      ["running", "paused", "exporting", "stopping"].includes(
+        getAutomationPhase(automationState)
+      ) || getPendingFileCount(automationState) > 0
     );
   }
 
@@ -160,14 +195,20 @@
 
   function renderAutomation(state, announce = false) {
     automationState = state && typeof state === "object" ? state : null;
+    const recoveryLock = automationState?.recoveryLock === true;
     const phase = getAutomationPhase(automationState);
     const capturedCount = getCapturedCount(automationState);
+    const acceptedFileCount = getAcceptedFileCount(automationState);
     const downloadedFileCount = getDownloadedFileCount(automationState);
+    const failedFileCount = getFailedFileCount(automationState);
+    const pendingFileCount = getPendingFileCount(automationState);
     const stateTargetCount = getTargetCount(automationState);
     if (stateTargetCount >= 1 && stateTargetCount <= 500) {
       automationTargetInput.value = String(stateTargetCount);
     }
-    const displayedTarget = stateTargetCount || Number(automationTargetInput.value) || 0;
+    const displayedTarget = recoveryLock
+      ? pendingFileCount
+      : stateTargetCount || Number(automationTargetInput.value) || 0;
     automationProgressNode.max = Math.max(1, displayedTarget);
     const displayedProgress =
       phase === "exporting" ? downloadedFileCount : capturedCount;
@@ -176,17 +217,29 @@
       displayedTarget || 1
     );
     automationProgressTextNode.textContent =
-      phase === "exporting"
-        ? `${downloadedFileCount} / ${displayedTarget} 个文件`
-        : `${capturedCount} / ${displayedTarget} 章`;
+      recoveryLock
+        ? `等待 ${pendingFileCount} 个文件`
+        : phase === "exporting"
+          ? `已完成 ${downloadedFileCount} / ${displayedTarget} 个文件`
+          : `${capturedCount} / ${displayedTarget} 章`;
+
+    const downloadSummary = `浏览器已接收 ${acceptedFileCount} 个，已完成 ${downloadedFileCount} 个${
+      failedFileCount > 0 ? `，失败 ${failedFileCount} 个` : ""
+    }${pendingFileCount > 0 ? `，等待 ${pendingFileCount} 个` : ""}。`;
 
     const presentation = {
-      idle: ["未运行", "", "自动采集、打开下一章，并在达到目标后按所选格式导出。"],
+      idle: recoveryLock
+        ? [
+            "等待下载",
+            "running",
+            `浏览器仍有 ${pendingFileCount} 个自动导出文件未结束。`,
+          ]
+        : ["未运行", "", "自动采集、打开下一章，并在达到目标后按所选格式导出。"],
       running: ["运行中", "running", `正在自动采集，已完成 ${capturedCount} 章。`],
       exporting: [
         "正在下载",
         "running",
-        `正在下载 ${downloadedFileCount} / ${displayedTarget} 个章节文件。`,
+        downloadSummary,
       ],
       paused: [
         "等待验证",
@@ -194,13 +247,25 @@
         "请在当前标签页手动完成验证后，再点击“继续自动化”。",
       ],
       stopping: ["停止中", "paused", "正在安全停止自动采集……"],
-      completed: ["已完成", "completed", `本次已采集 ${capturedCount} 章。`],
-      stopped: ["已停止", "", `本次已保留 ${capturedCount} 章。`],
+      completed: [
+        "已完成",
+        "completed",
+        `本次已采集 ${capturedCount} 章，并完成 ${downloadedFileCount} 个文件下载。`,
+      ],
+      stopped: [
+        "已停止",
+        "",
+        pendingFileCount > 0
+          ? `本次已保留 ${capturedCount} 章。${downloadSummary}`
+          : `本次已保留 ${capturedCount} 章。`,
+      ],
       failed: [
         "运行失败",
         "failed",
-        automationState?.lastError?.message ||
-          "已采集章节仍保留，可直接设置目标章数重新开始。",
+        `${
+          automationState?.lastError?.message ||
+          "已采集章节仍保留，可直接设置目标章数重新开始。"
+        }${pendingFileCount > 0 ? ` ${downloadSummary}` : ""}`,
       ],
     }[phase];
     automationStateNode.textContent = presentation[0];
@@ -246,7 +311,9 @@
     formatSelect.disabled = busy || locked;
     automationTargetInput.disabled = busy || locked;
     automationStartButton.disabled =
-      busy || ["running", "exporting", "stopping"].includes(phase);
+      busy ||
+      ["running", "exporting", "stopping"].includes(phase) ||
+      (locked && phase !== "paused");
     automationStopButton.disabled =
       busy || !["running", "paused"].includes(phase);
     diagnosticsButton.disabled = actionBusy;
@@ -559,7 +626,9 @@
       const definition = logs.describe(code);
       setStatus(
         error instanceof Error ? error.message : String(error),
-        code === "CHAPTER_DUPLICATE_SKIPPED" ? "warning" : "error",
+        ["AUTOMATION_BATCH_LOCKED", "CHAPTER_DUPLICATE_SKIPPED"].includes(code)
+          ? "warning"
+          : "error",
         code,
         operationId
       );
@@ -1059,7 +1128,9 @@
   }
 
   async function initialize() {
-    await logs.event("POPUP_OPENED", {}, "popup");
+    actionBusy = true;
+    refreshControls();
+    await logs.event("POPUP_OPENED", {}, "popup").catch(() => null);
     try {
       const settings = (await storageGet(core.SETTINGS_STORAGE_KEY)) || {};
       if (["txt", "json"].includes(settings.exportFormat)) {
@@ -1100,6 +1171,7 @@
         "popup"
       );
     }
+    actionBusy = false;
     refreshControls();
   }
 

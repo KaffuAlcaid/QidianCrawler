@@ -141,6 +141,12 @@
       suggestion: "已采集章节仍保留在当前批次中，可手动导出。",
       allowedDetails: ["capturedCount", "targetCount", "reason"],
     },
+    AUTOMATION_BATCH_LOCKED: {
+      level: "WARN",
+      message: "自动任务仍在使用当前批次",
+      suggestion: "等待浏览器下载完成或失败后，再修改、导出或清空批次。",
+      allowedDetails: ["reason"],
+    },
     AUTOMATION_COMPLETED: {
       level: "INFO",
       message: "自动采集和导出已完成",

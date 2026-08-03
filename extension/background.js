@@ -93,6 +93,13 @@ function settleDownload(downloadId, completed, reason) {
   return downloadTracker.settle(downloadId, completed, reason);
 }
 
+async function countPendingAutomationDownloads() {
+  const pending = await downloadTracker.readPending();
+  return Object.values(pending).filter(
+    (item) => Boolean(item.downloadToken) && !item.terminal
+  ).length;
+}
+
 const automationStorageArea = {
   get(key) {
     return new Promise((resolve, reject) => {
@@ -370,6 +377,19 @@ function matchesExpectedDownloadPath(actualPath, expectedPath) {
   return new RegExp(`${escapedStem} \\(\\d+\\)${escapedExtension}$`).test(actual);
 }
 
+function terminalDownloadResult(item) {
+  if (item?.state === "complete") {
+    return { completed: true, reason: null };
+  }
+  if (item?.state === "interrupted" || item?.error) {
+    return {
+      completed: false,
+      reason: item.error || "interrupted",
+    };
+  }
+  return null;
+}
+
 async function findAcceptedAutomationDownload(
   exported,
   operationId,
@@ -383,7 +403,10 @@ async function findAcceptedAutomationDownload(
       item.operationId === operationId && item.fileIndex === fileIndex
   );
   if (tracked) {
-    return Number(tracked[0]);
+    return {
+      downloadId: Number(tracked[0]),
+      terminal: tracked[1].terminal || null,
+    };
   }
 
   const items = await downloadsSearchQuery({
@@ -412,7 +435,10 @@ async function findAcceptedAutomationDownload(
   if (match.state === "complete" || match.state === "interrupted") {
     await releaseOffscreenDownloadUrl(downloadToken);
   }
-  return match.id;
+  return {
+    downloadId: match.id,
+    terminal: terminalDownloadResult(match),
+  };
 }
 
 async function downloadAutomationExport(exported, operationId, metadata = {}) {
@@ -426,7 +452,7 @@ async function downloadAutomationExport(exported, operationId, metadata = {}) {
     fileIndex,
     downloadToken
   );
-  if (Number.isInteger(recoveredId)) {
+  if (Number.isInteger(recoveredId?.downloadId)) {
     return recoveredId;
   }
 
@@ -455,7 +481,10 @@ async function downloadAutomationExport(exported, operationId, metadata = {}) {
   if (current?.state === "complete" || current?.state === "interrupted") {
     await releaseOffscreenDownloadUrl(downloadToken);
   }
-  return downloadId;
+  return {
+    downloadId,
+    terminal: terminalDownloadResult(current),
+  };
 }
 
 const automationController =
@@ -467,6 +496,8 @@ const automationController =
     extractPage,
     navigateTab,
     getTab,
+    inspectDownload: downloadsSearch,
+    getPendingTrackedDownloadCount: countPendingAutomationDownloads,
     downloadExport: downloadAutomationExport,
     record: (code, operationId, details, eventKey) =>
       record(code, "automation", operationId, details, eventKey),
@@ -569,10 +600,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     );
   }
   if (message.type === "batch-add") {
-    return respondBatch(sendResponse, batchStore.addChapter(message.chapter));
+    return respondBatch(
+      sendResponse,
+      automationController.addChapter(message.chapter)
+    );
   }
   if (message.type === "batch-clear") {
-    return respondBatch(sendResponse, batchStore.clearBatch());
+    return respondBatch(sendResponse, automationController.clearBatch());
   }
   if (message.type === "get-logs") {
     return respond(sendResponse, logStore.read().then((logs) => ({ logs })));
@@ -642,14 +676,38 @@ async function settleAndReleaseDownload(downloadId, completed, reason) {
 
 chrome.downloads.onChanged.addListener((change) => {
   if (change.error?.current || change.state?.current === "interrupted") {
-    void settleAndReleaseDownload(
-      change.id,
-      false,
-      change.error?.current || "interrupted"
-    ).catch(() => console.error("[DOWNLOAD_FAILED] 下载失败日志写入失败。"));
+    void (async () => {
+      let trackingFailed = false;
+      try {
+        await settleAndReleaseDownload(
+          change.id,
+          false,
+          change.error?.current || "interrupted"
+        );
+      } catch {
+        trackingFailed = true;
+      }
+      await automationController.handleDownloadSettled(change.id, false);
+      if (trackingFailed) {
+        console.error("[DOWNLOAD_FAILED] 下载失败日志写入失败。");
+      }
+    })().catch(() =>
+      console.error("[AUTOMATION_FAILED] 自动下载失败状态写入失败。")
+    );
   } else if (change.state?.current === "complete") {
-    void settleAndReleaseDownload(change.id, true, null).catch(() =>
-      console.error("[DOWNLOAD_COMPLETED] 下载完成日志写入失败。")
+    void (async () => {
+      let trackingFailed = false;
+      try {
+        await settleAndReleaseDownload(change.id, true, null);
+      } catch {
+        trackingFailed = true;
+      }
+      await automationController.handleDownloadSettled(change.id, true);
+      if (trackingFailed) {
+        console.error("[DOWNLOAD_COMPLETED] 下载完成日志写入失败。");
+      }
+    })().catch(() =>
+      console.error("[AUTOMATION_FAILED] 自动下载完成状态写入失败。")
     );
   }
 });

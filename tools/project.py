@@ -88,6 +88,9 @@ FORBIDDEN_EXTENSION_PATH_PARTS = {
 }
 MAX_EXTENSION_FILE_BYTES = 1024 * 1024
 FIXED_ZIP_DATETIME = (2026, 1, 1, 0, 0, 0)
+GITATTRIBUTES_FILENAME = ".gitattributes"
+GITATTRIBUTES_ROOT_RULE = "* text=auto eol=lf"
+VALID_GIT_EOL_VALUES = frozenset({"lf", "crlf"})
 
 
 class ProjectValidationError(RuntimeError):
@@ -199,6 +202,57 @@ def _read_utf8(path: Path, errors: list[str]) -> str:
     except UnicodeDecodeError as error:
         errors.append(f"[UTF8_INVALID] 文件不是有效 UTF-8：{path} ({error})")
         return ""
+
+
+def _validate_gitattributes(root: Path, errors: list[str]) -> None:
+    path = root / GITATTRIBUTES_FILENAME
+    if not path.is_file():
+        errors.append(
+            f"[GITATTRIBUTES_INVALID] 根目录缺少 {GITATTRIBUTES_FILENAME}；"
+            f"必须包含根规则 {GITATTRIBUTES_ROOT_RULE!r}。"
+        )
+        return
+
+    data = path.read_bytes()
+    reasons: list[str] = []
+    if data.startswith(b"\xef\xbb\xbf"):
+        reasons.append("必须使用无 BOM 的 UTF-8")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        errors.append(
+            f"[GITATTRIBUTES_INVALID] {GITATTRIBUTES_FILENAME} 必须是有效 UTF-8，"
+            f"且根规则必须精确为 {GITATTRIBUTES_ROOT_RULE!r}。"
+        )
+        return
+
+    if b"\r" in data:
+        reasons.append("文件必须使用 LF 行尾")
+    if len(text.splitlines()) != 1:
+        reasons.append("文件必须只包含一条根规则，不得拆行或包含多余内容")
+
+    eol_values = re.findall(r"(?<!\S)eol=([^\s]+)", text)
+    invalid_eol_values = sorted(
+        {value for value in eol_values if value not in VALID_GIT_EOL_VALUES}
+    )
+    if invalid_eol_values:
+        reasons.append(
+            "eol 仅允许 lf 或 crlf，发现 " + ", ".join(invalid_eol_values)
+        )
+    elif eol_values != ["lf"]:
+        reasons.append("本项目根规则必须使用 eol=lf")
+
+    expected = f"{GITATTRIBUTES_ROOT_RULE}\n"
+    if text != expected:
+        reasons.append(
+            f"完整内容必须精确为 {GITATTRIBUTES_ROOT_RULE!r} 并以 LF 结尾"
+        )
+    if reasons:
+        errors.append(
+            f"[GITATTRIBUTES_INVALID] {GITATTRIBUTES_FILENAME} 无效："
+            + "；".join(reasons)
+            + "。"
+        )
 
 
 def extension_files(root: Path) -> list[Path]:
@@ -324,6 +378,7 @@ def validate_project(root: Path) -> ValidationReport:
         files = extension_files(root)
     except ProjectValidationError as error:
         raise error
+    _validate_gitattributes(root, errors)
 
     manifest_path = extension_root / "manifest.json"
     if not manifest_path.is_file():

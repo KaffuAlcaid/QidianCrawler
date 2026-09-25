@@ -1,15 +1,11 @@
-"""QidianCrawler 项目校验、浏览器测试与可复现打包工具。"""
+"""QidianCrawler 项目静态校验与可复现打包工具。"""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
-import subprocess
-import sys
-import tempfile
 import zipfile
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -127,54 +123,12 @@ class LocalReferenceParser(HTMLParser):
             self.references.append(reference)
 
 
-class BrowserResultParser(HTMLParser):
-    """读取无头浏览器输出中的机器状态和测试摘要。"""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.status: str | None = None
-        self.expected_tests: int | None = None
-        self._inside_summary = False
-        self._summary_parts: list[str] = []
-
-    @property
-    def summary(self) -> str:
-        return "".join(self._summary_parts).strip()
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = dict(attrs)
-        if tag == "body":
-            self.status = attributes.get("data-status")
-            expected = attributes.get("data-expected-tests")
-            if expected and expected.isdecimal():
-                self.expected_tests = int(expected)
-        elif tag == "p" and attributes.get("id") == "summary":
-            self._inside_summary = True
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "p" and self._inside_summary:
-            self._inside_summary = False
-
-    def handle_data(self, data: str) -> None:
-        if self._inside_summary:
-            self._summary_parts.append(data)
-
-
 @dataclass(frozen=True)
 class ValidationReport:
     version: str
     permissions: tuple[str, ...]
     files: tuple[str, ...]
     referenced_files: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class BrowserTestResult:
-    browser: Path
-    browser_version: str
-    summary: str
-    test_count: int
-    compatibility_mode: bool
 
 
 @dataclass(frozen=True)
@@ -485,233 +439,6 @@ def validate_project(root: Path) -> ValidationReport:
     )
 
 
-def find_browser(explicit: str | Path | None = None) -> Path | None:
-    if explicit:
-        requested = Path(explicit).expanduser()
-        if not requested.is_file():
-            raise RuntimeError(
-                f"[BROWSER_EXPLICIT_INVALID] --browser 指定的文件不存在：{requested}"
-            )
-        return requested.resolve()
-
-    candidates: list[Path] = []
-    environment_browser = os.environ.get("QIDIANCRAWLER_BROWSER")
-    if environment_browser:
-        configured = Path(environment_browser).expanduser()
-        if not configured.is_file():
-            raise RuntimeError(
-                "[BROWSER_ENV_INVALID] QIDIANCRAWLER_BROWSER 指向的文件不存在："
-                f"{configured}"
-            )
-        return configured.resolve()
-    for name in ("google-chrome", "google-chrome-stable", "chrome", "chromium", "msedge"):
-        located = shutil.which(name)
-        if located:
-            candidates.append(Path(located))
-    if sys.platform == "win32":
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        if local_app_data:
-            candidates.extend(
-                [
-                    Path(local_app_data) / "Google/Chrome/Application/chrome.exe",
-                    Path(local_app_data) / "Microsoft/Edge/Application/msedge.exe",
-                ]
-            )
-        candidates.extend(
-            [
-                Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-                Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
-                Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-                Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-            ]
-        )
-    seen: set[Path] = set()
-    for candidate in candidates:
-        normalized = candidate.expanduser()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        if normalized.is_file():
-            return normalized.resolve()
-    return None
-
-
-def browser_version(browser: Path) -> str:
-    """尽力读取实际执行的浏览器版本；失败时返回明确的未知说明。"""
-
-    try:
-        completed = subprocess.run(
-            [str(browser), "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return "未知（浏览器未能返回 --version）"
-    output = (completed.stdout or completed.stderr).strip().splitlines()
-    if completed.returncode == 0 and output:
-        return output[0][:200]
-    return "未知（浏览器未返回版本文本）"
-
-
-def _parse_browser_document(document: str) -> BrowserResultParser:
-    parser = BrowserResultParser()
-    parser.feed(document)
-    parser.close()
-    return parser
-
-
-def _expected_browser_tests(runner: Path) -> int:
-    try:
-        source = runner.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as error:
-        raise RuntimeError(
-            f"[BROWSER_TEST_METADATA] 无法读取浏览器测试页：{error}"
-        ) from error
-    metadata = _parse_browser_document(source)
-    if metadata.expected_tests is None or metadata.expected_tests <= 0:
-        raise RuntimeError(
-            "[BROWSER_TEST_METADATA] tests/runner.html 必须声明正整数 "
-            "data-expected-tests。"
-        )
-    return metadata.expected_tests
-
-
-def run_browser_tests(
-    root: Path,
-    browser: str | Path | None = None,
-    *,
-    required: bool = True,
-) -> BrowserTestResult | None:
-    root = root.resolve()
-    browser_path = find_browser(browser)
-    if browser_path is None:
-        if required:
-            raise RuntimeError(
-                "[BROWSER_MISSING] 找不到 Chrome/Edge。可通过 "
-                "QIDIANCRAWLER_BROWSER 指定浏览器路径。"
-            )
-        return None
-    runner = root / "tests" / "runner.html"
-    if not runner.is_file():
-        raise RuntimeError(f"[BROWSER_TEST_MISSING] 找不到浏览器测试页：{runner}")
-
-    expected_tests = _expected_browser_tests(runner)
-
-    def execute(extra_flags: list[str]) -> subprocess.CompletedProcess[str]:
-        with tempfile.TemporaryDirectory(prefix="qidiancrawler-browser-") as profile:
-            command = [
-                str(browser_path),
-                "--headless=new",
-                "--disable-background-networking",
-                "--disable-component-update",
-                "--disable-default-apps",
-                "--disable-gpu",
-                "--no-default-browser-check",
-                "--no-first-run",
-                "--virtual-time-budget=5000",
-                *extra_flags,
-                f"--user-data-dir={profile}",
-                "--dump-dom",
-                runner.resolve().as_uri(),
-            ]
-            try:
-                return subprocess.run(
-                    command,
-                    cwd=root,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=45,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as error:
-                raise RuntimeError(
-                    "[BROWSER_TEST_TIMEOUT] 浏览器测试 45 秒内没有结束。"
-                ) from error
-
-    completed = execute([])
-    compatibility_mode = False
-    standard_error = completed.stderr
-    gpu_startup_failed = (
-        completed.returncode != 0
-        and (
-            "GPU process isn't usable" in completed.stderr
-            or completed.returncode == -1073741790
-        )
-    )
-    if gpu_startup_failed:
-        compatibility_mode = True
-        completed = execute(
-            [
-                "--no-sandbox",
-                "--disable-gpu-sandbox",
-                "--disable-software-rasterizer",
-                "--disable-features=Vulkan,Dawn,SkiaGraphite",
-            ]
-        )
-    output = completed.stdout
-    browser_document = _parse_browser_document(output)
-    summary_match = re.fullmatch(
-        r"\s*(\d+)\s+通过，\s*(\d+)\s+失败\s*", browser_document.summary
-    )
-    passed = int(summary_match.group(1)) if summary_match else -1
-    failed = int(summary_match.group(2)) if summary_match else -1
-    complete = (
-        completed.returncode == 0
-        and browser_document.status == "passed"
-        and browser_document.expected_tests == expected_tests
-        and summary_match is not None
-        and expected_tests > 0
-        and passed == expected_tests
-        and failed == 0
-    )
-    if not complete:
-        summary = browser_document.summary or "浏览器测试未返回结构化摘要。"
-        stderr_tail = completed.stderr[-1500:].strip()
-        if compatibility_mode and standard_error:
-            stderr_tail = (
-                "标准无头模式发生 GPU 沙箱启动失败；兼容重试仍未通过。\n"
-                + stderr_tail
-            ).strip()
-        raise RuntimeError(
-            f"[BROWSER_TEST_FAILED] {summary}；"
-            f"预期 {expected_tests} 项，实际通过 {passed}、失败 {failed}。"
-            + (f"\n浏览器输出：{stderr_tail}" if stderr_tail else "")
-        )
-    return BrowserTestResult(
-        browser=browser_path,
-        browser_version=browser_version(browser_path),
-        summary=browser_document.summary,
-        test_count=expected_tests,
-        compatibility_mode=compatibility_mode,
-    )
-
-
-def run_python_tests(root: Path) -> None:
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
-            "tests",
-            "-p",
-            "test_*.py",
-            "-v",
-        ],
-        cwd=root.resolve(),
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError("[PYTHON_TEST_FAILED] Python 配套测试未通过。")
-
-
 def _safe_dist_root(root: Path, dist_root: Path | None) -> Path:
     root = root.resolve()
     requested = dist_root or (root / "dist")
@@ -728,7 +455,6 @@ def _safe_dist_root(root: Path, dist_root: Path | None) -> Path:
     protected = [
         (root / EXTENSION_DIRECTORY).resolve(),
         (root / "tools").resolve(),
-        (root / "tests").resolve(),
     ]
     for directory in protected:
         overlaps = (
@@ -738,7 +464,7 @@ def _safe_dist_root(root: Path, dist_root: Path | None) -> Path:
         )
         if overlaps:
             raise RuntimeError(
-                "[DIST_OVERLAP] 打包目录不能与扩展源码、工具或测试目录相交："
+                "[DIST_OVERLAP] 打包目录不能与扩展源码或工具目录相交："
                 f"{resolved}"
             )
     return resolved

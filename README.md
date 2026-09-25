@@ -2,7 +2,7 @@
 
 QidianCrawler 是一个面向 Windows 版 Chrome 和 Edge 的 Manifest V3 浏览器扩展。支持手动采集，也支持用户明确启动后按目标章数自动采集，并将批次导出为 UTF-8 TXT 或 JSON。
 
-自动模式沿页面提供的“下一章”链接逐页采集；登录和安全验证由用户在浏览器中手动完成。仓库里的 `tools/` 和 `tests/` 仅用于开发校验与打包。
+自动模式沿页面提供的“下一章”链接逐页采集；登录和安全验证由用户在浏览器中手动完成。仓库里的 `tools/` 用于静态校验与打包。
 
 本项目的开发、验证和支持范围为 Windows 版 Chrome 与 Edge。
 
@@ -124,32 +124,15 @@ TXT 和 JSON 都按章节分别生成文件。TXT 写入书名、章节标题和
 
 扩展不声明常驻站点权限、Cookie、网络拦截、历史记录、标签页列表或无限存储权限等，不包含主动网络请求代码。
 
-## 测试
+## 静态校验
 
-测试和打包使用 Python 3.10 以上标准库和本机 Chrome/Edge。Git 可用时还会验证不同 `core.autocrlf` checkout 的产物字节一致；缺少 Git 时会跳过该项：
+校验和打包使用 Python 3.10 以上标准库：
 
 ```powershell
 python tools/check.py
 ```
 
-该命令依次执行：
-
-1. Manifest、权限、资源引用、UTF-8 和安全规则静态校验。
-2. Python `unittest` 项目及跨 Git 行尾配置的可复现打包测试。
-3. 使用本机 Chrome/Edge 无头模式打开 `tests/runner.html`，执行纯模块的真实 JavaScript、DOM 提取、批次、自动任务状态、TXT/JSON、文件名、日志轮转与测试。
-4. 测试器会核对预期测试数、实际通过数和失败数，并要求至少运行一项测试。
-
-需要指定浏览器时：
-
-```powershell
-python tools/check.py --browser "C:\Program Files\Google\Chrome\Application\chrome.exe"
-```
-
-如果显式指定的浏览器路径无效，命令会立即失败。校验输出会列出实际使用的浏览器路径和可读取到的版本
-
-若某些受限 Windows 环境无法创建 Chrome GPU 沙箱，测试器会先明确记录标准启动失败，再仅针对仓库中的本地合成测试页使用兼容参数重试
-
-也可以直接用 Chrome 打开 `tests/runner.html` 查看逐项结果。这里运行的是普通页面环境中的核心模块单元测试。
+该命令检查 Manifest、权限、资源引用、UTF-8、行尾规则和扩展安全约束。
 
 ## 打包
 
@@ -157,7 +140,7 @@ python tools/check.py --browser "C:\Program Files\Google\Chrome\Application\chro
 python tools/package.py
 ```
 
-打包器会先执行全部校验和测试，再生成：
+打包器会先执行静态校验，再生成：
 
 ```text
 dist/
@@ -171,7 +154,6 @@ ZIP 中的 `manifest.json` 位于根目录，可作为扩展商店上传包；
 
 ```text
 extension/       Chrome/Edge 共用的扩展运行源码
-tests/           Python 测试与浏览器内 JavaScript/DOM 测试
 tools/           Python 标准库校验及可复现打包工具
 dist/            本地生成的发布产物，不进入源码版本控制
 ```

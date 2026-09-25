@@ -762,16 +762,21 @@
         if (pendingDownloadCount(existing) > 0) {
           throw createError(
             "AUTOMATION_DOWNLOADS_PENDING",
-            "上一自动任务仍有浏览器下载未结束，请等待下载完成或失败后再重试。"
+            "上一自动任务的文件仍在下载，请等待下载完成或失败后再试。"
           );
         }
         if ((await pendingTrackedDownloadCount()) > 0) {
           throw createError(
             "AUTOMATION_DOWNLOADS_PENDING",
-            "浏览器仍有自动导出的文件未结束，请等待下载完成或失败后再重试。"
+            "自动导出文件仍在下载，请等待下载完成或失败后再试。"
           );
         }
-        const batch = await batchStore.getBatch();
+        const tab = await getTab(options.tabId);
+        if (!core.isSupportedChapterUrl(tab?.url)) {
+          throw createError("PAGE_UNSUPPORTED", "请在起点章节页面启动自动采集。");
+        }
+        const bookId = new URL(tab.url).pathname.split("/")[2];
+        const batch = await batchStore.getBatch(bookId);
         const initialChapterKeys = batchChapters(batch).map((chapter) =>
           core.chapterKey(chapter)
         );
@@ -786,6 +791,7 @@
           },
           now()
         );
+        await batchStore.selectBatch(bookId);
         await persist(state);
         await safeSetBadge(state);
         await safeRecord("AUTOMATION_STARTED", state, {
@@ -899,10 +905,29 @@
         if (locksBatch(current) || (await pendingTrackedDownloadCount()) > 0) {
           throw createError(
             "AUTOMATION_BATCH_LOCKED",
-            "自动任务或浏览器下载尚未结束，当前批次不能清空。"
+            "请在自动任务结束并确认浏览器下载结果后，再清空当前批次。"
           );
         }
-        return batchStore.clearBatch();
+        const result = await batchStore.clearBatch();
+        await stateApi.clear(storageArea);
+        await safeSetBadge(null);
+        return result;
+      });
+    }
+
+    function selectBatch(bookId) {
+      return enqueue(async () => {
+        const current = await refreshDownloadStateUnlocked(await stateApi.load(storageArea));
+        if (locksBatch(current) || (await pendingTrackedDownloadCount()) > 0) {
+          throw createError(
+            "AUTOMATION_BATCH_LOCKED",
+            "请在自动任务结束并确认浏览器下载结果后，再切换书籍批次。"
+          );
+        }
+        const result = await batchStore.selectBatch(bookId);
+        await stateApi.clear(storageArea);
+        await safeSetBadge(null);
+        return result;
       });
     }
 
@@ -913,10 +938,16 @@
         if (locksBatch(current) || (await pendingTrackedDownloadCount()) > 0) {
           throw createError(
             "AUTOMATION_BATCH_LOCKED",
-            "自动任务或浏览器下载尚未结束，当前批次不能修改。"
+            "请在自动任务结束并确认浏览器下载结果后，再采集章节。"
           );
         }
-        return batchStore.addChapter(chapter);
+        const previous = await batchStore.getBatch();
+        const result = await batchStore.addChapter(chapter, now(), { selectBook: true });
+        if (String(previous?.bookId || "") !== String(result.batch.bookId)) {
+          await stateApi.clear(storageArea);
+          await safeSetBadge(null);
+        }
+        return result;
       });
     }
 
@@ -1056,6 +1087,7 @@
       stop,
       addChapter,
       clearBatch,
+      selectBatch,
       handleDownloadSettled,
       handleTabUpdated,
       handleTabRemoved,

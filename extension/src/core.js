@@ -157,6 +157,35 @@
     return { ok: true, error: null };
   }
 
+  function readBatchCollection(value) {
+    const collection = !value
+      ? { schemaVersion: 2, activeBookId: null, batches: [] }
+      : value.schemaVersion === BATCH_SCHEMA_VERSION
+        ? { schemaVersion: 2, activeBookId: String(value.bookId), batches: [value] }
+        : value;
+    const ids = new Set();
+    if (
+      collection.schemaVersion !== 2 ||
+      !Array.isArray(collection.batches) ||
+      !(
+        collection.activeBookId === null ||
+        (typeof collection.activeBookId === "string" && collection.activeBookId.trim())
+      ) ||
+      collection.batches.some((batch) => {
+        if (!validateBatch(batch).ok || ids.has(String(batch.bookId))) {
+          return true;
+        }
+        ids.add(String(batch.bookId));
+        return false;
+      })
+    ) {
+      const error = new Error("书籍批次数据损坏，无法读取。");
+      error.code = "STORAGE_READ_FAILED";
+      throw error;
+    }
+    return collection;
+  }
+
   function addChapter(existingBatch, chapter, now = new Date().toISOString()) {
     const normalized = normalizeChapter(chapter, now);
     const batch = existingBatch || createBatch(normalized, now);
@@ -318,6 +347,7 @@
     chapterKey,
     createBatch,
     validateBatch,
+    readBatchCollection,
     addChapter,
     estimateUtf8Bytes,
     formatChapterText,

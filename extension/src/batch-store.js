@@ -42,10 +42,9 @@
       return result;
     }
 
-    async function readBatchUnlocked() {
-      let batch;
+    async function readCollectionUnlocked() {
       try {
-        batch = (await storage.get(core.BATCH_STORAGE_KEY)) || null;
+        return core.readBatchCollection(await storage.get(core.BATCH_STORAGE_KEY));
       } catch (error) {
         throw createBatchError(
           "STORAGE_READ_FAILED",
@@ -53,17 +52,21 @@
           { reason: "batch-storage-read" }
         );
       }
-      if (batch) {
-        const validation = core.validateBatch(batch);
-        if (!validation.ok) {
-          throw createBatchError(
-            "STORAGE_READ_FAILED",
-            `当前批次数据损坏：${validation.error}`,
-            { reason: "invalid-batch" }
-          );
-        }
-      }
-      return batch;
+    }
+
+    function selectedBatch(collection, bookId = collection.activeBookId) {
+      return collection.batches.find((batch) => String(batch.bookId) === bookId) || null;
+    }
+
+    function snapshot(collection) {
+      return {
+        batch: selectedBatch(collection),
+        batches: collection.batches.map((batch) => ({
+          bookId: String(batch.bookId),
+          bookTitle: batch.bookTitle,
+          chapterCount: batch.chapters.length,
+        })),
+      };
     }
 
     async function getBytesInUse(key = null) {
@@ -97,51 +100,82 @@
       }
     }
 
-    async function assertWriteFits(existingBatch, nextBatch) {
-      const batchBytes = core.estimateUtf8Bytes(nextBatch);
-      if (batchBytes > maxBatchBytes) {
-        throw createBatchError(
-          "BATCH_SIZE_LIMIT_REACHED",
-          "加入本章后批次会超过安全容量上限，请先导出并清空。",
-          {
-            bytes: batchBytes,
-            limitBytes: maxBatchBytes,
-            chapterCount: nextBatch.chapters.length,
-          }
-        );
-      }
-
+    async function writeCollectionUnlocked(collection, reservedBytes = reserveBytes) {
       const [totalBytes, existingItemBytes] = await Promise.all([
         getBytesInUse(null),
-        existingBatch ? getBytesInUse(core.BATCH_STORAGE_KEY) : Promise.resolve(0),
+        getBytesInUse(core.BATCH_STORAGE_KEY),
       ]);
       const keyBytes = core.estimateUtf8Bytes(core.BATCH_STORAGE_KEY);
-      const nextItemBytes = batchBytes + keyBytes;
+      const nextItemBytes = core.estimateUtf8Bytes(collection) + keyBytes;
       const predictedBytes = Math.max(0, totalBytes - existingItemBytes) + nextItemBytes;
-      const usableQuotaBytes = Math.max(0, quotaBytes - reserveBytes);
+      const usableQuotaBytes = Math.max(0, quotaBytes - reservedBytes);
       if (predictedBytes > usableQuotaBytes) {
         throw createBatchError(
           "BATCH_SIZE_LIMIT_REACHED",
-          "浏览器本地存储空间不足，无法安全加入本章，请先导出并清空。",
+          "浏览器本地存储空间不足，请先导出并清空不再需要的书籍批次。",
           {
             bytes: predictedBytes,
             limitBytes: usableQuotaBytes,
-            chapterCount: nextBatch.chapters.length,
+            chapterCount: selectedBatch(collection)?.chapters.length || 0,
           }
+        );
+      }
+      try {
+        await storage.set(core.BATCH_STORAGE_KEY, collection);
+      } catch (error) {
+        throw createBatchError(
+          "STORAGE_WRITE_FAILED",
+          error instanceof Error ? error.message : String(error),
+          { reason: "batch-storage-write" }
         );
       }
       return { predictedBytes, quotaBytes };
     }
 
-    function getBatch() {
-      return enqueue(() => readBatchUnlocked());
+    function getBatch(bookId) {
+      return enqueue(async () => selectedBatch(await readCollectionUnlocked(), bookId));
     }
 
-    function addChapter(chapter, now = new Date().toISOString()) {
+    function getSnapshot() {
+      return enqueue(async () => snapshot(await readCollectionUnlocked()));
+    }
+
+    function selectBatch(bookId) {
       return enqueue(async () => {
-        const existingBatch = await readBatchUnlocked();
+        const collection = await readCollectionUnlocked();
+        const activeBookId = core.compact(bookId);
+        if (!activeBookId) {
+          throw createBatchError("INVALID_BATCH", "请选择书籍批次。");
+        }
+        if (collection.activeBookId !== activeBookId) {
+          collection.activeBookId = activeBookId;
+          await writeCollectionUnlocked(collection, 0);
+        }
+        return snapshot(collection);
+      });
+    }
+
+    function addChapter(
+      chapter,
+      now = new Date().toISOString(),
+      { selectBook = false } = {}
+    ) {
+      return enqueue(async () => {
+        const collection = await readCollectionUnlocked();
+        const bookId = core.compact(chapter?.bookId);
+        const existingBatch = selectedBatch(
+          collection,
+          selectBook || !collection.activeBookId ? bookId : collection.activeBookId
+        );
+        // 自动翻页只能向启动时选定的书籍写入，包括尚无章节的新书。
+        if (!selectBook && collection.activeBookId && collection.activeBookId !== bookId) {
+          return { status: "different-book", batch: existingBatch };
+        }
         const result = core.addChapter(existingBatch, chapter, now);
-        if (result.status !== "added") {
+        if (
+          result.status !== "added" &&
+          !(result.status === "duplicate" && collection.activeBookId !== bookId)
+        ) {
           return {
             ...result,
             storageBytes: await getBytesInUseOr(null, 0),
@@ -149,16 +183,26 @@
           };
         }
 
-        const capacity = await assertWriteFits(existingBatch, result.batch);
-        try {
-          await storage.set(core.BATCH_STORAGE_KEY, result.batch);
-        } catch (error) {
+        const batchBytes = core.estimateUtf8Bytes(result.batch);
+        if (batchBytes > maxBatchBytes) {
           throw createBatchError(
-            "STORAGE_WRITE_FAILED",
-            error instanceof Error ? error.message : String(error),
-            { reason: "batch-storage-write" }
+            "BATCH_SIZE_LIMIT_REACHED",
+            "加入本章后批次会超过安全容量上限，请先导出并清空。",
+            {
+              bytes: batchBytes,
+              limitBytes: maxBatchBytes,
+              chapterCount: result.batch.chapters.length,
+            }
           );
         }
+        collection.activeBookId = bookId;
+        const index = collection.batches.findIndex((batch) => String(batch.bookId) === bookId);
+        if (index < 0) {
+          collection.batches.push(result.batch);
+        } else {
+          collection.batches[index] = result.batch;
+        }
+        const capacity = await writeCollectionUnlocked(collection);
         return {
           ...result,
           storageBytes: await getBytesInUseOr(
@@ -172,11 +216,18 @@
 
     function clearBatch() {
       return enqueue(async () => {
-        const batch = await readBatchUnlocked();
+        const collection = await readCollectionUnlocked();
+        const batch = selectedBatch(collection);
         const clearedCount = batch?.chapters?.length || 0;
         if (batch) {
           try {
-            await storage.remove(core.BATCH_STORAGE_KEY);
+            collection.batches = collection.batches.filter((item) => item !== batch);
+            collection.activeBookId = null;
+            if (collection.batches.length > 0) {
+              await storage.set(core.BATCH_STORAGE_KEY, collection);
+            } else {
+              await storage.remove(core.BATCH_STORAGE_KEY);
+            }
           } catch (error) {
             throw createBatchError(
               "STORAGE_WRITE_FAILED",
@@ -197,6 +248,8 @@
 
     return Object.freeze({
       getBatch,
+      getSnapshot,
+      selectBatch,
       addChapter,
       clearBatch,
     });

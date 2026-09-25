@@ -23,7 +23,11 @@
           <h2 id="batch-title">当前批次</h2>
           <span id="batch-size" class="size">0 B</span>
         </div>
-        <p id="batch-book" class="book-title">尚未采集章节</p>
+        <p id="batch-book" class="book-title">等待采集</p>
+        <label for="batch-select">书籍批次</label>
+        <select id="batch-select" disabled>
+          <option value="">等待采集</option>
+        </select>
         <p class="count"><strong id="batch-count">0</strong> 章</p>
       </section>
 
@@ -44,7 +48,7 @@
           aria-describedby="automation-hint"
         >
         <p id="automation-hint" class="field-hint">
-          当前批次会计入目标，可输入 1–500 章；建议单次不超过 100 章
+          当前页面书籍的已有章节会计入目标，可输入 1–500 章
         </p>
         <div class="automation-controls">
           <button id="automation-start" type="button">开始自动化</button>
@@ -78,7 +82,7 @@
             <option value="txt">TXT</option>
             <option value="json">JSON</option>
           </select>
-          <button id="export-batch" type="button">导出</button>
+          <button id="export-batch" type="button">选择文件夹并导出</button>
         </div>
         <button id="clear-batch" class="danger-link" type="button">
           清空当前批次

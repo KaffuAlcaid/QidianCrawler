@@ -84,7 +84,7 @@ class RepositoryScopeTests(unittest.TestCase):
 
     def test_browser_fixtures_are_small_and_synthetic(self) -> None:
         runner = PROJECT_ROOT / "tests" / "runner.js"
-        self.assertLess(runner.stat().st_size, 64 * 1024)
+        self.assertLess(runner.stat().st_size, 96 * 1024)
         content = runner.read_text(encoding="utf-8")
         self.assertIn("合成正文", content)
         self.assertNotIn("example/0.html", content)

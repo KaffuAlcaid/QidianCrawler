@@ -23,6 +23,7 @@
   const batchBookNode = document.querySelector("#batch-book");
   const batchCountNode = document.querySelector("#batch-count");
   const batchSizeNode = document.querySelector("#batch-size");
+  const batchSelect = document.querySelector("#batch-select");
   const statusNode = document.querySelector("#status");
   const statusMessageNode = document.querySelector("#status-message");
   const statusMetaNode = document.querySelector("#status-meta");
@@ -183,7 +184,7 @@
     } else if (phase === "failed") {
       const failureMessage =
         state?.lastError?.message ||
-        "自动采集未能继续，已采集的章节仍保留在当前批次中。";
+        "自动采集已中断，已采集章节仍保留在当前批次中。";
       setStatus(
         failureMessage,
         "error",
@@ -232,7 +233,7 @@
         ? [
             "等待下载",
             "running",
-            `浏览器仍有 ${pendingFileCount} 个自动导出文件未结束。`,
+            `正在等待 ${pendingFileCount} 个自动导出文件的下载结果。`,
           ]
         : ["未运行", "", "自动采集、打开下一章，并在达到目标后按所选格式导出。"],
       running: ["运行中", "running", `正在自动采集，已完成 ${capturedCount} 章。`],
@@ -284,20 +285,15 @@
   function renderBatch(batch) {
     currentBatch = batch;
     const count = batch?.chapters?.length || 0;
-    batchBookNode.textContent = batch?.bookTitle || "尚未采集章节";
+    batchBookNode.textContent = batch?.bookTitle || "等待采集";
     automationBookNode.textContent = batch?.bookTitle
       ? `书名：${batch.bookTitle}`
       : "书名：等待采集首章";
     batchCountNode.textContent = String(count);
     batchSizeNode.textContent = batch ? formatBytes(core.estimateUtf8Bytes(batch)) : "0 B";
-    automationTargetInput.min = String(Math.max(1, count));
-    if (
-      !automationLocksBatch() &&
-      Number(automationTargetInput.value) < count
-    ) {
-      automationTargetInput.value = String(count);
-    }
+    batchSelect.value = batch ? String(batch.bookId) : "";
     const locked = automationLocksBatch();
+    batchSelect.disabled = actionBusy || automationBusy || locked || batchSelect.options.length <= 1;
     exportButton.disabled = actionBusy || automationBusy || locked || count === 0;
     clearButton.disabled = actionBusy || automationBusy || locked || count === 0;
   }
@@ -369,7 +365,7 @@
           reject(
             createUiError(
               response?.code || "STORAGE_WRITE_FAILED",
-              response?.error || "扩展后台没有返回有效的批次结果。",
+              response?.error || "扩展后台返回的批次结果无效。",
               response?.details || { reason: "batch-background-failed" }
             )
           );
@@ -398,7 +394,7 @@
           reject(
             createUiError(
               response?.code || "AUTOMATION_FAILED",
-              response?.error || "扩展后台没有返回有效的自动化结果。",
+              response?.error || "扩展后台返回的自动化结果无效。",
               response?.details || { reason: "automation-background-failed" }
             )
           );
@@ -455,7 +451,7 @@
             reject(
               createUiError(
                 "CHAPTER_EXTRACTION_FAILED",
-                "无法读取页面。安装或更新扩展后，请先刷新章节页。",
+                "页面读取失败。安装或更新扩展后，请刷新章节页再试。",
                 { reason: "script-injection-failed" }
               )
             );
@@ -466,7 +462,7 @@
             reject(
               createUiError(
                 "CHAPTER_EXTRACTION_FAILED",
-                "页面没有返回章节解析结果。",
+                "章节解析结果为空。",
                 { reason: "empty-extraction-result" }
               )
             );
@@ -528,8 +524,39 @@
         );
       }
     }
+    const options = (response.batches || []).map((item) => {
+      const option = document.createElement("option");
+      option.value = item.bookId;
+      option.textContent = `${item.bookTitle}（${item.chapterCount} 章）`;
+      return option;
+    });
+    if (!batch) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = options.length ? "请选择书籍批次" : "等待采集";
+      option.disabled = true;
+      options.unshift(option);
+    }
+    batchSelect.replaceChildren(...options);
     renderBatch(batch);
     return batch;
+  }
+
+  async function selectBatch() {
+    const bookId = batchSelect.value;
+    actionBusy = true;
+    refreshControls();
+    try {
+      await sendBatchMessage({ type: "batch-select", bookId });
+      await loadBatch();
+      await loadAutomationState();
+      setStatus("已切换书籍批次。", "success");
+    } catch (error) {
+      setStatus(error.message, "error", error.code || "STORAGE_WRITE_FAILED");
+    } finally {
+      actionBusy = false;
+      refreshControls();
+    }
   }
 
   async function captureCurrentChapter() {
@@ -554,7 +581,7 @@
         );
         const error = createUiError(
           "DIFFERENT_BOOK_REJECTED",
-          "当前批次属于另一部书，请先导出或清空批次。"
+          "章节与所选书籍批次不一致，请重新打开弹窗后重试。"
         );
         error.logged = true;
         throw error;
@@ -570,7 +597,7 @@
           operationId
         );
         setStatus(
-          `“${chapter.title}”已经在批次中，没有重复加入。`,
+          `“${chapter.title}”已在当前批次中，本次跳过。`,
           "warning",
           "CHAPTER_DUPLICATE_SKIPPED",
           operationId
@@ -671,7 +698,7 @@
       if (!navigationUrl || !core.isSupportedChapterUrl(navigationUrl)) {
         throw createUiError(
           "NEXT_CHAPTER_MISSING",
-          "当前页面没有可用的“下一章”链接。",
+          "当前页面缺少可用的“下一章”链接。",
           {
             reason: navigationUrl ? "invalid-next-url" : "next-link-missing",
             adapterId: chapter.adapterId,
@@ -712,51 +739,64 @@
     }
   }
 
-  function startDownload(exported) {
-    return new Promise((resolve, reject) => {
-      const blobUrl = URL.createObjectURL(
-        new Blob([exported.content], { type: exported.mimeType })
-      );
-      chrome.downloads.download(
-        {
-          url: blobUrl,
-          filename: exported.relativePath,
-          conflictAction: "uniquify",
-          saveAs: false,
-        },
-        (downloadId) => {
-          const runtimeError = chrome.runtime.lastError;
-          window.setTimeout(() => URL.revokeObjectURL(blobUrl), 30_000);
-          if (runtimeError || downloadId === undefined) {
-            reject(
-              createUiError(
-                "DOWNLOAD_REJECTED",
-                runtimeError?.message || "浏览器没有开始下载。",
-                { reason: "download-api-rejected" }
-              )
-            );
-            return;
-          }
-          resolve(downloadId);
+  async function saveChapter(directory, exported) {
+    const extension = `.${exported.format}`;
+    const basename = exported.filename.slice(0, -extension.length);
+    let filename = exported.filename;
+    for (let suffix = 2; ; suffix += 1) {
+      try {
+        await directory.getFileHandle(filename);
+      } catch (error) {
+        if (error?.name === "NotFoundError") {
+          break;
         }
-      );
-    });
+        if (error?.name !== "TypeMismatchError") {
+          throw error;
+        }
+      }
+      filename = `${basename} (${suffix})${extension}`;
+    }
+    const file = await directory.getFileHandle(filename, { create: true });
+    const writer = await file.createWritable();
+    try {
+      await writer.write(exported.content);
+      await writer.close();
+    } catch (error) {
+      await writer.abort().catch(() => undefined);
+      throw error;
+    }
   }
 
   async function exportBatch() {
     const operationId = logs.createOperationId("export");
     actionBusy = true;
     refreshControls();
-    setStatus("正在生成导出文件……", "normal", null, operationId);
+    setStatus("请选择批次的保存文件夹……", "normal", null, operationId);
     const format = formatSelect.value;
     let chapterCount = currentBatch?.chapters?.length || 0;
     let fileCount = chapterCount;
-    let acceptedCount = 0;
-    let trackingFailedCount = 0;
+    let savedCount = 0;
     try {
+      if (typeof window.showDirectoryPicker !== "function") {
+        throw createUiError(
+          "EXPORT_FAILED",
+          "当前浏览器不支持选择文件夹，请使用新版 Chrome 或 Edge。",
+          { reason: "directory-picker-unavailable" }
+        );
+      }
+      let destination;
+      try {
+        destination = await window.showDirectoryPicker({ mode: "readwrite" });
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          setStatus("已取消导出。", "normal");
+          return;
+        }
+        throw error;
+      }
       const batch = await loadBatch();
       if (!batch || batch.chapters.length === 0) {
-        throw createUiError("EXPORT_FAILED", "当前批次没有可导出的章节。", {
+        throw createUiError("EXPORT_FAILED", "请先采集章节，再导出当前批次。", {
           reason: "empty-batch",
         });
       }
@@ -779,72 +819,41 @@
         },
         operationId
       );
+      const projectDirectory = await destination.getDirectoryHandle(core.PROJECT_NAME, {
+        create: true,
+      });
+      const bookDirectory = await projectDirectory.getDirectoryHandle(
+        exports[0].folderName,
+        { create: true }
+      );
       for (const exported of exports) {
         setStatus(
-          `正在提交下载 ${exported.fileIndex} / ${fileCount}……`,
+          `正在保存章节 ${exported.fileIndex} / ${fileCount}……`,
           "normal",
           null,
           operationId
         );
-        try {
-          const downloadId = await startDownload(exported);
-          acceptedCount += 1;
-          const tracked = await logs
-            .trackDownload(downloadId, {
-              format,
-              chapterCount,
-              operationId,
-              fileIndex: exported.fileIndex,
-              fileCount,
-            })
-            .catch(() => null);
-          if (!tracked) {
-            trackingFailedCount += 1;
-          }
-        } catch (error) {
-          error.details = {
-            ...(error.details || {}),
-            acceptedCount,
-            fileIndex: exported.fileIndex,
-            fileCount,
-          };
-          throw error;
-        }
+        await saveChapter(bookDirectory, exported);
+        savedCount += 1;
       }
-      setStatus(
-        trackingFailedCount === 0
-          ? `浏览器已接收 ${fileCount} 个章节文件。`
-          : `浏览器已接收 ${fileCount} 个章节文件，其中 ${trackingFailedCount} 个未能记录完成状态。`,
-        trackingFailedCount === 0 ? "success" : "warning",
-        trackingFailedCount === 0 ? "DOWNLOAD_ACCEPTED" : "STORAGE_WRITE_FAILED",
+      await logs.event(
+        "EXPORT_SAVED",
+        { format, chapterCount, fileCount },
         operationId
       );
+      setStatus(`已保存 ${savedCount} 个章节文件。`, "success", "EXPORT_SAVED", operationId);
     } catch (error) {
       const rawCode = error?.code || "EXPORT_FAILED";
       const code = logs.describe(rawCode) ? rawCode : "EXPORT_FAILED";
-      if (code === "DOWNLOAD_REJECTED") {
-        await logs.event(
-          "DOWNLOAD_REJECTED",
-          {
-            format,
-            chapterCount,
-            fileIndex: error?.details?.fileIndex || acceptedCount + 1,
-            fileCount,
-            acceptedCount,
-            reason: error?.details?.reason || "download-api-rejected",
-          },
-          operationId
-        );
-      } else if (code !== "STORAGE_READ_FAILED") {
+      if (code !== "STORAGE_READ_FAILED") {
         await logs.event(
           "EXPORT_FAILED",
           {
             format,
             chapterCount,
             fileCount,
-            acceptedCount,
-            failedCount: Math.max(0, fileCount - acceptedCount),
-            reason: error?.details?.reason || "serialization-failed",
+            failedCount: Math.max(0, fileCount - savedCount),
+            reason: error?.details?.reason || "file-save-failed",
           },
           operationId
         );
@@ -856,11 +865,9 @@
         );
       }
       setStatus(
-        code === "DOWNLOAD_REJECTED"
-          ? `已提交 ${acceptedCount}/${fileCount} 个章节文件；当前批次仍保留。`
-          : error instanceof Error
-            ? error.message
-            : String(error),
+        `${savedCount > 0 ? `已保存 ${savedCount}/${fileCount} 章。` : ""}${
+          error instanceof Error ? error.message : String(error)
+        }`,
         "error",
         code,
         operationId
@@ -913,17 +920,14 @@
 
   function readTargetCount() {
     const targetCount = Number(automationTargetInput.value);
-    const currentCount = currentBatch?.chapters?.length || 0;
     if (
       !Number.isInteger(targetCount) ||
-      targetCount < Math.max(1, currentCount) ||
+      targetCount < 1 ||
       targetCount > 500
     ) {
       throw createUiError(
         "AUTOMATION_FAILED",
-        currentCount > 0
-          ? `目标章数必须是 ${currentCount} 到 500 之间的整数。`
-          : "目标章数必须是 1 到 500 之间的整数。",
+        "目标章数必须是 1 到 500 之间的整数。",
         { reason: "invalid-target-count" }
       );
     }
@@ -1181,6 +1185,7 @@
   automationStopButton.addEventListener("click", stopAutomation);
   exportButton.addEventListener("click", exportBatch);
   clearButton.addEventListener("click", clearBatch);
+  batchSelect.addEventListener("change", selectBatch);
   diagnosticsButton.addEventListener("click", () => void openDiagnostics());
   formatSelect.addEventListener("change", persistFormat);
   automationTargetInput.addEventListener("change", () => {
@@ -1191,8 +1196,9 @@
   });
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName === "local" && changes[core.BATCH_STORAGE_KEY]) {
-      const nextBatch = changes[core.BATCH_STORAGE_KEY].newValue || null;
-      renderBatch(nextBatch);
+      void loadBatch().catch((error) => {
+        setStatus(error.message, "error", "STORAGE_READ_FAILED");
+      });
     }
     if (areaName === "session" && changes[automationStorageKey]) {
       renderAutomation(changes[automationStorageKey].newValue || null, true);

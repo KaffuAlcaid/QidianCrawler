@@ -94,6 +94,7 @@ h2 {
   font-size: 20px;
 }
 
+.batch-card label,
 .automation-card label,
 .export-card label {
   display: block;

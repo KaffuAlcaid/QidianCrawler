@@ -229,7 +229,11 @@
         if (options.tab === null) {
           return null;
         }
-        return options.tab || { id: tabId, status: "complete" };
+        return options.tab || {
+          id: tabId,
+          status: "complete",
+          url: "https://www.qidian.com/chapter/1024424884/1/",
+        };
       },
       async inspectDownload(downloadId) {
         if (typeof options.inspectDownload === "function") {
@@ -1505,6 +1509,118 @@
     batch = await store.getBatch();
     equal(batch.chapters.length, 1, "清空后的串行采集结果错误");
     equal(batch.chapters[0].chapterId, "3");
+  });
+
+  test("旧版批次可按书籍切换、去重和清空，重建存储实例后仍保留", async () => {
+    const legacy = batchFrom([sampleChapter("1"), sampleChapter("2")]);
+    const storage = createAsyncBatchStorage({ [core.BATCH_STORAGE_KEY]: legacy });
+    const store = batchStoreApi.createBatchStore({ storage });
+    equal(JSON.stringify(await store.getBatch()), JSON.stringify(legacy));
+    equal(storage.writeCount, 0, "读取旧版数据不应触发写入");
+    await store.addChapter(sampleChapter("1", "999"), undefined, { selectBook: true });
+    equal((await store.getSnapshot()).batches.length, 2);
+    equal((await store.getBatch()).bookId, "999");
+    equal(JSON.stringify(await store.getBatch(legacy.bookId)), JSON.stringify(legacy));
+    const duplicate = await store.addChapter(sampleChapter("1"), undefined, { selectBook: true });
+    equal(duplicate.status, "duplicate");
+    equal((await store.getBatch()).bookId, legacy.bookId);
+    equal((await store.getBatch()).chapters.length, 2);
+    const reopened = batchStoreApi.createBatchStore({ storage });
+    equal((await reopened.getBatch()).bookId, legacy.bookId);
+    await reopened.selectBatch("999");
+    const exported = core.createChapterExports(await reopened.getBatch(), "json");
+    equal(JSON.parse(exported[0].content).book.id, "999");
+    const cleared = await reopened.clearBatch();
+    equal(cleared.clearedCount, 1);
+    equal(await reopened.getBatch(), null);
+    equal((await reopened.getSnapshot()).batches.length, 1);
+    await reopened.selectBatch(legacy.bookId);
+    equal(JSON.stringify(await reopened.getBatch()), JSON.stringify(legacy));
+  });
+
+  test("多书共享存储配额，超限不会覆盖旧书或切换所选批次", async () => {
+    const first = batchFrom([sampleChapter("1")]);
+    const secondChapter = sampleChapter("1", "999");
+    secondChapter.paragraphs = ["第二本书的正文".repeat(100)];
+    const second = batchFrom([secondChapter]);
+    const limit = core.estimateUtf8Bytes(core.BATCH_STORAGE_KEY) +
+      core.estimateUtf8Bytes({ schemaVersion: 2, activeBookId: "999", batches: [first, second] }) - 1;
+    const storage = createAsyncBatchStorage({ [core.BATCH_STORAGE_KEY]: first });
+    const store = batchStoreApi.createBatchStore({ storage, quotaBytes: limit, reserveBytes: 0 });
+    await rejectsCode(
+      () => store.addChapter(secondChapter, "2026-01-01T00:00:00.000Z", { selectBook: true }),
+      "BATCH_SIZE_LIMIT_REACHED"
+    );
+    equal(storage.writeCount, 0);
+    equal(JSON.stringify(await store.getBatch()), JSON.stringify(first));
+    equal((await store.getSnapshot()).batches.length, 1);
+  });
+
+  test("切换书籍写入失败时旧版批次仍可读取", async () => {
+    const legacy = batchFrom([sampleChapter("1")]);
+    const storage = createAsyncBatchStorage({ [core.BATCH_STORAGE_KEY]: legacy });
+    storage.set = async () => { throw new Error("合成写入失败"); };
+    const store = batchStoreApi.createBatchStore({ storage });
+    await rejectsCode(() => store.selectBatch("999"), "STORAGE_WRITE_FAILED");
+    equal(JSON.stringify(await store.getBatch()), JSON.stringify(legacy));
+  });
+
+  test("自动换书使用对应目标与导出，下载期间禁止切换", async () => {
+    const otherChapter = { ...sampleChapter("1", "999"), ok: true, adapterId: "qidian" };
+    const harness = createAutomationHarness({
+      batch: batchFrom([sampleChapter("1"), sampleChapter("2")]),
+      tab: { id: 7, status: "complete", url: otherChapter.sourceUrl },
+      extractions: [otherChapter],
+      downloadIds: [301, 302],
+    });
+    const exporting = await harness.controller.start({ tabId: 7, targetCount: 1, format: "json" });
+    equal(exporting.capturedCount, 1, "旧书章数不应计入新书任务");
+    equal(harness.downloads.length, 1);
+    equal(JSON.parse(harness.downloads[0].exported.content).book.id, "999");
+    equal((await harness.batchStore.getBatch("1024424884")).chapters.length, 2);
+    await rejectsCode(() => harness.controller.selectBatch("1024424884"), "AUTOMATION_BATCH_LOCKED");
+    await harness.controller.handleDownloadSettled(301, true);
+    await harness.controller.selectBatch("1024424884");
+    equal(await harness.controller.getState(), null, "切换后不应显示上一书籍的自动任务状态");
+    await harness.controller.start({ tabId: 7, targetCount: 1, format: "json" });
+    equal(harness.extractionCalls, 1, "当前页面书籍达到目标时应导出其已有批次");
+    equal(JSON.parse(harness.downloads[1].exported.content).book.id, "999");
+    await harness.controller.handleDownloadSettled(302, true);
+    await harness.controller.clearBatch();
+    equal((await harness.batchStore.getSnapshot()).batches.length, 1);
+    equal((await harness.batchStore.getBatch("1024424884")).chapters.length, 2);
+  });
+
+  test("新书首次提取遇到验证时保留旧书并锁定书籍选择", async () => {
+    const otherChapter = { ...sampleChapter("1", "999"), ok: true, adapterId: "qidian" };
+    const harness = createAutomationHarness({
+      batch: batchFrom([sampleChapter("1")]),
+      tab: { id: 7, status: "complete", url: otherChapter.sourceUrl },
+      extractions: [{ ok: false, reason: "challenge-page" }, otherChapter],
+    });
+    const paused = await harness.controller.start({ tabId: 7, targetCount: 1, format: "txt" });
+    equal(paused.status, automationStateApi.STATUS.PAUSED);
+    equal(paused.capturedCount, 0);
+    equal(harness.downloads.length, 0, "验证期间不应导出旧书");
+    await rejectsCode(() => harness.controller.selectBatch("1024424884"), "AUTOMATION_BATCH_LOCKED");
+    const resumed = await harness.controller.resume({ tabId: 7 });
+    equal(resumed.capturedCount, 1);
+    equal((await harness.batchStore.getSnapshot()).batches.length, 2);
+    equal((await harness.batchStore.getBatch()).bookId, "999");
+  });
+
+  test("自动采集首章仍拒绝与启动页面不同的书籍", async () => {
+    const harness = createAutomationHarness({
+      batch: batchFrom([sampleChapter("1")]),
+      tab: { id: 7, status: "complete", url: "https://www.qidian.com/chapter/999/1/" },
+      extractions: [automaticChapter("2")],
+    });
+    const failed = await harness.controller.start({ tabId: 7, targetCount: 1, format: "txt" });
+    equal(failed.status, automationStateApi.STATUS.FAILED);
+    equal(failed.lastError.code, "AUTOMATION_DIFFERENT_BOOK");
+    equal(harness.downloads.length, 0);
+    equal((await harness.batchStore.getBatch("1024424884")).chapters.length, 1);
+    equal(await harness.batchStore.getBatch("999"), null);
   });
 
   test("批次会在写入前按实际 storage quota 拒绝超限章节", async () => {

@@ -6,7 +6,6 @@
     EXTENSION_INSTALLED: {
       level: "INFO",
       message: "扩展已安装",
-      suggestion: "无需处理。",
       allowedDetails: ["reason"],
     },
     EXTENSION_UPDATED: {
@@ -18,7 +17,6 @@
     LEGACY_STATE_REMOVED: {
       level: "INFO",
       message: "旧版自动化状态已清理",
-      suggestion: "无需处理。",
       allowedDetails: ["removedKeyCount"],
     },
     WORKER_UNHANDLED_ERROR: {
@@ -30,13 +28,11 @@
     POPUP_OPENED: {
       level: "DEBUG",
       message: "扩展弹窗已打开",
-      suggestion: "无需处理。",
       allowedDetails: [],
     },
     PAGE_INSPECTION_STARTED: {
       level: "DEBUG",
       message: "开始检查当前章节页面",
-      suggestion: "无需处理。",
       allowedDetails: ["adapterId"],
     },
     PAGE_UNSUPPORTED: {
@@ -65,20 +61,20 @@
     },
     CHAPTER_DUPLICATE_SKIPPED: {
       level: "WARN",
-      message: "重复章节未再次加入",
+      message: "已收录该章节，本次跳过",
       suggestion: "可以打开下一章继续采集。",
       allowedDetails: ["chapterCount", "adapterId"],
     },
     DIFFERENT_BOOK_REJECTED: {
       level: "WARN",
       message: "已阻止把不同书籍加入同一批次",
-      suggestion: "先导出或清空当前批次，再采集另一部书。",
+      suggestion: "返回当前任务所属书籍的章节页，再开始采集。",
       allowedDetails: ["chapterCount", "adapterId"],
     },
     BATCH_SIZE_LIMIT_REACHED: {
       level: "ERROR",
-      message: "当前批次已达到扩展的安全容量上限",
-      suggestion: "先导出并清空当前批次，再继续采集。",
+      message: "章节批次或本地存储已达到容量上限",
+      suggestion: "先导出并清空不再需要的书籍批次，再继续采集。",
       allowedDetails: ["bytes", "limitBytes", "chapterCount"],
     },
     BATCH_CLEARED: {
@@ -95,7 +91,7 @@
     },
     NEXT_CHAPTER_MISSING: {
       level: "WARN",
-      message: "当前页面没有可用的下一章链接",
+      message: "当前页面缺少可用的下一章链接",
       suggestion: "确认是否已到最新章节，或手动打开目标章节。",
       allowedDetails: ["reason", "adapterId"],
     },
@@ -108,7 +104,6 @@
     AUTOMATION_PROGRESS: {
       level: "INFO",
       message: "自动采集已加入一章",
-      suggestion: "无需处理。",
       allowedDetails: [
         "capturedCount",
         "targetCount",
@@ -120,7 +115,6 @@
     AUTOMATION_NAVIGATING: {
       level: "DEBUG",
       message: "自动采集正在打开下一章",
-      suggestion: "无需处理。",
       allowedDetails: ["capturedCount", "targetCount", "adapterId", "delayMs"],
     },
     AUTOMATION_CHALLENGE_PAUSED: {
@@ -173,8 +167,13 @@
     EXPORT_SERIALIZED: {
       level: "DEBUG",
       message: "章节文件已完成序列化",
-      suggestion: "无需处理。",
       allowedDetails: ["format", "chapterCount", "fileCount", "bytes"],
+    },
+    EXPORT_SAVED: {
+      level: "INFO",
+      message: "批次已保存到所选文件夹",
+      suggestion: "可在所选文件夹的 QidianCrawler 目录下查看章节文件。",
+      allowedDetails: ["format", "chapterCount", "fileCount"],
     },
     EXPORT_FAILED: {
       level: "ERROR",
@@ -217,7 +216,6 @@
     DOWNLOAD_COMPLETED: {
       level: "INFO",
       message: "文件下载完成",
-      suggestion: "无需处理。",
       allowedDetails: [
         "format",
         "chapterCount",
@@ -279,7 +277,6 @@
     DIAGNOSTICS_STARTED: {
       level: "DEBUG",
       message: "开始运行扩展自检",
-      suggestion: "无需处理。",
       allowedDetails: [],
     },
     DIAGNOSTICS_COMPLETED: {

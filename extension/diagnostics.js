@@ -324,25 +324,24 @@
     );
 
     checks.push(
-      await safeCheck("BATCH", "当前批次", async () => {
-        const batch = await storageGet(chrome.storage.local, core.BATCH_STORAGE_KEY);
-        if (!batch) {
+      await safeCheck("BATCH", "书籍批次", async () => {
+        const collection = core.readBatchCollection(
+          await storageGet(chrome.storage.local, core.BATCH_STORAGE_KEY)
+        );
+        if (collection.batches.length === 0) {
           return createCheck(
             "BATCH",
             "skip",
-            "当前批次",
-            "尚未采集章节，跳过批次结构检查。"
+            "书籍批次",
+            "书籍批次为空，跳过结构检查。"
           );
         }
-        const validation = core.validateBatch(batch);
-        if (!validation.ok) {
-          throw new Error(validation.error);
-        }
+        const chapterCount = collection.batches.reduce((sum, batch) => sum + batch.chapters.length, 0);
         return createCheck(
           "BATCH",
           "pass",
-          "当前批次",
-          `结构有效，共 ${batch.chapters.length} 章。`
+          "书籍批次",
+          `结构有效，共 ${collection.batches.length} 本书、${chapterCount} 章。`
         );
       })
     );
@@ -539,12 +538,17 @@
   }
 
   async function buildReport() {
-    const [entries, settings, batch] = await Promise.all([
+    const [entries, settings, storedBatches] = await Promise.all([
       logs.getLogs(),
       logs.getSettings(),
       storageGet(chrome.storage.local, core.BATCH_STORAGE_KEY),
     ]);
-    const validation = batch ? core.validateBatch(batch) : { ok: true };
+    let collection = null;
+    try {
+      collection = core.readBatchCollection(storedBatches);
+    } catch {
+      // 损坏的批次仍允许导出不含正文的诊断报告。
+    }
     const report = {
       schemaVersion: 1,
       kind: "qidian-crawler-diagnostic-report",
@@ -568,10 +572,11 @@
         reason: "not-checked",
       },
       batch: {
-        present: Boolean(batch),
-        valid: Boolean(validation.ok),
-        chapterCount: batch?.chapters?.length || 0,
-        estimatedBytes: batch ? core.estimateUtf8Bytes(batch) : 0,
+        present: Boolean(storedBatches),
+        valid: Boolean(collection),
+        bookCount: collection?.batches.length || 0,
+        chapterCount: collection?.batches.reduce((sum, batch) => sum + batch.chapters.length, 0) || 0,
+        estimatedBytes: storedBatches ? core.estimateUtf8Bytes(storedBatches) : 0,
       },
       checks: latestChecks,
       logs: entries,

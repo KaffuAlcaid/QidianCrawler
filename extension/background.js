@@ -596,8 +596,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === "batch-get") {
     return respondBatch(
       sendResponse,
-      batchStore.getBatch().then((batch) => ({ batch }))
+      batchStore.getSnapshot()
     );
+  }
+  if (message.type === "batch-select") {
+    return respondBatch(sendResponse, automationController.selectBatch(message.bookId));
   }
   if (message.type === "batch-add") {
     return respondBatch(
